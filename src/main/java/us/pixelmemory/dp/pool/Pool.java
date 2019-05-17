@@ -1,0 +1,739 @@
+package us.pixelmemory.dp.pool;
+
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.LockSupport;
+import java.util.stream.Collectors;
+
+public class Pool<T, ERR extends Exception> {
+	private static final Servicing servicing = new Servicing();
+	private static final ExecutorService exec = Executors.newCachedThreadPool(r -> {
+		final Thread t = new Thread(r, "Pool async task worker");
+		t.setDaemon(true);
+		return t;
+	});
+
+	public enum LeaksMode {
+		OFF, ON, AUTO
+	}
+
+	public enum Profile {
+		TINY, GENTLE, RELIABLE, FAST
+	}
+
+	private final LeaksMode leaksMode;
+	private final long maxIdleMillis;
+	private final long maxUseTime;
+	private final int validateInterval;
+	private final int openBrokenRateMillis; // DoS throttle: Must wait this long between opening elements when the source is broken.
+	private final int openConcurrent;
+	private final int giveUpMillis; // Stall limiting: Give up after this long.
+	private final int giveUpBrokenMillis; // Stall limiting: Give up after failing for this long when failing.
+	private final int maxOpen;
+	private final String name;
+
+	final AtomicReference<MultiStackHead<T>> head = new AtomicReference<>(new MultiStackHead<>());
+	final PoolSource<T, ERR> source;
+	final ObjectTracker<T> tracker;
+	final Semaphore openSemaphore;
+
+	private volatile Exception currentFailure = null;
+	private volatile boolean showLeaks;
+	private volatile boolean openingThrottled = false; // Optimization to stop requests for more elements
+	private final AtomicInteger pendingOpen = new AtomicInteger(0);
+	private long lastOpenTime = 0;
+	private volatile boolean running = true;
+
+	public Pool(final Profile profile, final PoolSource<T, ERR> source, final String name) {
+		switch (profile) {
+			case TINY:
+				maxOpen = 64;
+				giveUpMillis = 45 * 1000;
+				giveUpBrokenMillis = 1000;
+				maxIdleMillis = 2000;
+				openBrokenRateMillis = 1000;
+				openConcurrent = 2;
+				validateInterval = 30 * 1000;
+				maxUseTime = 15 * 60 * 1000;
+			break;
+			case GENTLE:
+				maxOpen = 200;
+				giveUpMillis = 30 * 1000;
+				giveUpBrokenMillis = 1000;
+				maxIdleMillis = 30 * 1000;
+				openBrokenRateMillis = 500;
+				openConcurrent = 6;
+				validateInterval = 30 * 1000;
+				maxUseTime = 15 * 60 * 1000;
+			break;
+			case RELIABLE:
+				maxOpen = 1000;
+				giveUpMillis = 60 * 1000;
+				giveUpBrokenMillis = 30 * 1000;
+				maxIdleMillis = 60 * 1000;
+				openBrokenRateMillis = 500;
+				openConcurrent = 8;
+				validateInterval = 30 * 1000;
+				maxUseTime = 30 * 60 * 1000;
+			break;
+			case FAST:
+				maxOpen = 1000;
+				giveUpMillis = 5 * 1000;
+				giveUpBrokenMillis = 1 * 1000;
+				maxIdleMillis = 5 * 60 * 1000;
+				openBrokenRateMillis = 250;
+				openConcurrent = 24;
+				validateInterval = 60 * 1000;
+				maxUseTime = 60 * 1000;
+			break;
+			default:
+				throw new IllegalArgumentException("Profile: " + profile);
+		}
+
+		this.source = source;
+		this.name = name;
+		this.leaksMode = LeaksMode.AUTO;
+		showLeaks = false;
+		openSemaphore = new Semaphore(maxOpen);
+		tracker = new ObjectTracker<>(3 * maxOpen);
+	}
+
+	public Pool(final int maxOpen, final int openBrokenRateMillis, final int openConcurrent, final int giveUpMillis, final int giveUpBrokenMillis, final long maxIdleMillis, final int validateInterval, final long maxUseTime,
+			final PoolSource<T, ERR> source, final String name, final LeaksMode leaksMode) {
+		this.maxOpen = maxOpen;
+		this.giveUpMillis = giveUpMillis;
+		this.giveUpBrokenMillis = giveUpBrokenMillis;
+		this.maxIdleMillis = maxIdleMillis;
+		this.openBrokenRateMillis = openBrokenRateMillis;
+		this.openConcurrent = openConcurrent;
+		this.validateInterval = validateInterval;
+		this.maxUseTime = maxUseTime;
+		this.source = source;
+		this.name = name;
+		this.leaksMode = leaksMode;
+		showLeaks = leaksMode == LeaksMode.ON;
+		openSemaphore = new Semaphore(openConcurrent);
+		tracker = new ObjectTracker<>(3 * maxOpen);
+	}
+
+	public void put(final T element) {
+		final ObjectTracker.TraceRef<T> traceRef = tracker.getTraceRef(element);
+		final long now = System.currentTimeMillis();
+		final long checkOutTime = traceRef.getTime();
+		final long useTime = now - checkOutTime;
+
+		if (useTime > maxUseTime) {
+			// Bad coder held the connection too long.
+			// Name and shame
+			final Throwable t = traceRef.getTrace();
+			if (t != null) {
+				t.printStackTrace();// FIXME
+			}
+			if (leaksMode == LeaksMode.AUTO) {
+				showLeaks = true;
+			}
+		}
+
+		if (!running) {
+			sendBack(element);
+			return;
+		}
+
+		if (useTime > validateInterval) {
+			asyncValidation(element, now);
+			return;
+		}
+
+		push(element, now, checkOutTime);
+	}
+
+	public T get() throws TimeoutException, ERR {
+		final T e = pop();
+		tracker.getTraceRef(e).checkOut(showLeaks);
+		return e;
+	}
+
+	public void discard(final T e) {
+		exec.execute(() -> sendBack(e));
+	}
+
+	public void shutdown() {
+		running = false;
+		currentFailure = (RuntimeException) new RuntimeException("Shutdown").fillInStackTrace();
+		servicing.request(this);
+	}
+
+	public int countWaiting() {
+		int count = 0;
+		Waiting<T> h = head.get().waiting;
+		while (h != null) {
+			count += h.isStillWaiting() ? 1 : 0;
+			h = h.next;
+		}
+		return count;
+	}
+
+	public int countAvailable() {
+		int count = 0;
+		Ready<T> h = head.get().ready;
+		while (h != null) {
+			count += h.isStillAvailable() ? 1 : 0;
+			h = h.next;
+		}
+		return count;
+	}
+
+	@Override
+	public String toString() {
+		return "Pool " + name + " (open=" + tracker.count() + " waiting=" + countWaiting() + " available=" + countAvailable() + " opening=" + pendingOpen.get() + " throttled=" + openingThrottled + ")";
+	}
+
+	/**
+	 * Callback after Servicing.request();
+	 *
+	 * @return true if Pool is in need of periodic service (not empty / shut down)
+	 */
+	long service() {
+		collectLeaks();
+		if (running) {
+			cleanIdleReady();
+			return populate();
+		} else {
+			return cleanUpForQuit();
+		}
+	}
+
+	@SuppressWarnings("unchecked")
+	private T pop() throws TimeoutException, ERR {
+		final Waiting<T> w = new Waiting<>(Thread.currentThread());
+
+		while (true) {
+			final MultiStackHead<T> original = swapMultiHead(h -> {
+				if (h.ready != null) {
+					h.ready = h.ready.next;
+				} else {
+					w.next = h.waiting;
+					h.waiting = w;
+				}
+			});
+
+			if (original.ready != null) {
+				final T e = original.ready.tryTake();
+				if (e != null) {
+					return e;
+				}
+			} else {
+				if (!running) {
+					throw (RuntimeException) currentFailure;
+				}
+				if (!openingThrottled) {
+					servicing.request(this);
+				}
+				final T e = w.get((currentFailure == null) ? giveUpMillis : giveUpBrokenMillis);
+				if (e == null) {
+					final Exception err = currentFailure;
+					if (err != null) {
+						if (err instanceof RuntimeException) {
+							throw (RuntimeException) err;
+						} else {
+							throw (ERR) err;
+						}
+					} else {
+						throw new TimeoutException();
+					}
+				}
+				return e;
+			}
+		}
+	}
+
+	private void push(final T e, final long lastUsed, final long lastTested) {
+		final Ready<T> r = new Ready<>(e, lastUsed, lastTested);
+
+		while (true) {
+			final MultiStackHead<T> original = swapMultiHead(h -> {
+				if (h.waiting != null) {
+					// Take the waiting thread
+					h.waiting = h.waiting.next;
+				} else {
+					// Insert the ready element
+					r.next = h.ready;
+					h.ready = r;
+				}
+			});
+
+			if (original.waiting == null) {
+				return;
+			}
+
+			// This fails if the waiting thread timed out/died. It needs a re-try but it should be rare.
+			if (original.waiting.tryRespond(e)) {
+				return;
+			}
+		}
+	}
+
+	private TakenElement<T> tryPop() {
+		while (true) {
+			final MultiStackHead<T> original = swapMultiHead(h -> {
+				if (h.ready != null) {
+					h.ready = h.ready.next;
+				}
+			});
+
+			if (original.ready != null) {
+				final T e = original.ready.tryTake();
+				if (e != null) {
+					return new TakenElement<>(e, original.ready.lastUsed, original.ready.lastTested);
+				}
+			} else {
+				return null;
+			}
+		}
+	}
+
+	private void sendBack(final T e) {
+		try {
+			source.takeBack(e);
+		} catch (final Exception err) {
+			err.printStackTrace();
+		} finally {
+			tracker.remove(e);
+		}
+	}
+
+	private void asyncValidation(final T e, final long lastUsed) {
+		exec.execute(() -> {
+			final long now = System.currentTimeMillis();
+			if (validate(e)) {
+				push(e, lastUsed, now);
+			} else {
+				sendBack(e);
+			}
+		});
+	}
+
+	private boolean validate(final T e) {
+		try {
+			return source.validate(e);
+		} catch (final Exception err) {
+			err.printStackTrace();
+			return false;
+		}
+	}
+
+	private long cleanUpForQuit() {
+		TakenElement<T> e;
+		while ((e = tryPop()) != null) {
+			sendBack(e.element);
+		}
+
+		final MultiStackHead<T> original = swapMultiHead(h -> {
+			h.waiting = null;
+		});
+		Waiting<T> w = original.waiting;
+		while (w != null) {
+			w.abort();
+			w = w.next;
+		}
+
+		if (tracker.isEmtpy()) {
+			source.shutdown();
+			return -1;
+		} else {
+			return 1000;
+		}
+	}
+
+	private void collectLeaks() {
+		final List<ObjectTracker.TraceRef<T>> leaks = tracker.collectLeaks();
+		if (leaks.isEmpty()) {
+			return;
+		}
+
+		if (leaksMode == LeaksMode.AUTO) {
+			showLeaks = true;
+		}
+		for (final ObjectTracker.TraceRef<T> ref : leaks) {
+			final Throwable t = ref.getTrace();
+			final long time = ref.getTime();
+			System.out.println("Leak at " + new java.util.Date(time));
+			if (t != null) {
+				t.printStackTrace(); // FIXME
+			}
+		}
+	}
+
+	private Void create() {
+		try {
+			final long now = System.currentTimeMillis();
+			final T e = source.get();
+			tracker.add(e);
+			if (running) {
+				currentFailure = null;
+			}
+			push(e, now, now);
+		} catch (final Exception err) {
+			if (running) {
+				currentFailure = err;
+			}
+		} finally {
+			pendingOpen.updateAndGet(c -> ((c > 0) ? c - 1 : 0));
+		}
+		servicing.request(this); // Because throttle may be on
+		return null;
+	}
+
+	// Not multithread safe
+	private long populate() {
+		final long maxWait = Math.min(maxIdleMillis, validateInterval);
+		try {
+			while (running) {
+				openingThrottled = false; // Do this before counting to make race condition safe
+				final long now = System.currentTimeMillis();
+				final int waiting = countWaiting();
+				final int opening = pendingOpen.get();
+
+				if (opening >= waiting) {
+					return tracker.isEmtpy() ? -1 : maxWait;
+				}
+
+				final long errWaitTime = (lastOpenTime + openBrokenRateMillis) - now;
+				if ((currentFailure == null) || (errWaitTime < 0)) {
+					if (opening < openConcurrent) {
+						final int approxTotal = opening + tracker.count();
+						if (approxTotal < maxOpen) {
+							// Can open more
+							if (pendingOpen.compareAndSet(opening, opening + 1)) {
+								lastOpenTime = now;
+								exec.submit(this::create);
+							}
+						} else {
+							// Too many total open
+							openingThrottled = true;
+							return maxWait;
+						}
+					} else {
+						// Opening too many at once
+						openingThrottled = true;
+						return maxWait;
+					}
+				} else {
+					// Error mode and thorttled
+					return Math.min(errWaitTime, maxWait);
+				}
+			}
+		} catch (RuntimeException | Error e) {
+			// Safe values
+			openingThrottled = false;
+			pendingOpen.set(0);
+			throw e;
+		}
+
+		// Not running any more
+		return 100;
+	}
+
+	// Not multithread safe
+	private void cleanIdleReady() {
+		final long now = System.currentTimeMillis();
+		final long retestTime = now - validateInterval;
+		final long idleTime = now - maxIdleMillis;
+		TakenElement<T> testList = null;
+		TakenElement<T> returnList = null;
+
+		TakenElement<T> top;
+		do {
+			// Examine the top of the ready stack. This can be popped off.
+			while ((top = tryPop()) != null) {
+				// Can't modify the ready structure except the head but the contents of the link can be swapped.
+				// Pop a link off the head and use it as a replacement.
+				// It's possible that the head is also in need of work
+				if (top.lastUsed < idleTime) {
+					top.next = returnList;
+					returnList = top;
+				} else if (top.lastTested < retestTime) {
+					top.next = testList;
+					testList = top;
+				} else {
+					break; // Got a good one
+				}
+			}
+
+			if (top == null) {
+				break; // It's empty so done
+			}
+
+			// A good connection was taken off the head.
+			// Examine the rest of the ready stack and swap contents if needed
+			final MultiStackHead<T> h = head.get();
+			Ready<T> r = (h != null) ? h.ready : null;
+			while (r != null) {
+				if (r.lastUsed < idleTime) {
+					final TakenElement<T> old = r.trySwapValue(top.element, top.lastTested);
+					if (old != null) {
+						top = null; // Consumed for swap
+						old.next = returnList;
+						returnList = old;
+						break; // Need a new replacement off the top of the stack
+					}
+				} else if (r.lastTested < retestTime) {
+					final TakenElement<T> old = r.trySwapValue(top.element, top.lastTested);
+					if (old != null) {
+						top = null; // Consumed for swap
+						old.next = testList;
+						testList = old;
+						break; // Need a new replacement off the top of the stack
+					}
+				}
+				r = r.next;
+			}
+		} while (top == null); // Null here means consumed for swap
+
+		// Put this back
+		if (top != null) {
+			push(top.element, top.lastUsed, top.lastTested);
+		}
+
+		while (returnList != null) {
+			discard(returnList.element);
+			returnList = returnList.next;
+		}
+
+		while (testList != null) {
+			// This will validate, refresh the lastTested, and put back on the stack
+			asyncValidation(testList.element, testList.lastUsed);
+			testList = testList.next;
+		}
+	}
+
+	@FunctionalInterface
+	interface StackOperation<T> {
+		void apply(MultiStackHead<T> head);
+	}
+
+	private MultiStackHead<T> swapMultiHead(final StackOperation<T> operation) {
+		final MultiStackHead<T> to = new MultiStackHead<>();
+		MultiStackHead<T> from;
+		do {
+			from = head.get();
+			to.setFrom(from);
+			operation.apply(to);
+		} while (!head.compareAndSet(from, to));
+		return from;
+	}
+
+	static class Servicing {
+		private static final int maxIntervalMs = 10000;
+		private static final Pool<?, ?> THREAD_QUIT_MARKER = null; // Marker that worker thread for serviceChain has exited
+		private final AtomicReference<ServiceLink> serviceChain = new AtomicReference<>(new ServiceLink(THREAD_QUIT_MARKER));
+		private Thread worker;
+		private final LinkedHashMap<Pool<?, ?>, Long> nextService = new LinkedHashMap<>();
+
+		static final class ServiceLink {
+			ServiceLink next;
+			final Pool<?, ?> pool;
+
+			public ServiceLink(final Pool<?, ?> pool) {
+				this.pool = pool;
+			}
+		}
+
+		Servicing() {
+		}
+
+		void request(final Pool<?, ?> p) {
+			if (p == THREAD_QUIT_MARKER) {
+				throw new IllegalArgumentException(String.valueOf(p));
+			}
+			final ServiceLink sl = new ServiceLink(p);
+			final ServiceLink original = serviceChain.getAndUpdate(old -> {
+				sl.next = old;
+				return sl;
+			});
+
+			// Need to start worker if the top of linked list was the quit marker.
+			if ((original != null) && (original.pool == THREAD_QUIT_MARKER)) {
+				worker = new Thread(this::run, "Mail pool servicing thread");
+				worker.start();
+			} else {
+				LockSupport.unpark(worker);
+			}
+		}
+
+		private void run() {
+			final ServiceLink dead = new ServiceLink(THREAD_QUIT_MARKER);
+			boolean gracefulQuit = false;
+			try {
+				do {
+					do {
+						final long now = System.currentTimeMillis();
+						ServiceLink sl = serviceChain.getAndSet(null);
+						if (sl != null) {
+							final Long nowLong = Long.valueOf(now);
+							do {
+								if (sl.pool != THREAD_QUIT_MARKER) {
+									nextService.put(sl.pool, nowLong);
+								}
+							} while ((sl = sl.next) != null);
+						}
+
+						final List<Pool<?, ?>> todo = nextService.entrySet().stream().filter(e -> e.getValue().longValue() <= now).map(Map.Entry::getKey).collect(Collectors.toList());
+						long sleep = maxIntervalMs;
+						for (final Pool<?, ?> p : todo) {
+							// System.out.println(p);
+							final long wait = p.service();
+							// System.out.println(p + " " + wait);
+							if (wait >= 0) {
+								if (sleep > wait) {
+									sleep = wait;
+								}
+								nextService.put(p, Long.valueOf(now + wait));
+							} else {
+								nextService.remove(p);
+							}
+						}
+
+						if (sleep > 0) {
+							LockSupport.parkNanos(sleep);
+						}
+					} while (!nextService.isEmpty());
+				} while (!serviceChain.compareAndSet(null, dead));
+				gracefulQuit = true;
+			} finally {
+				if (!gracefulQuit) {
+					// This can leave some requests hanging but it fixes the next service request
+					final ServiceLink dead2 = new ServiceLink(THREAD_QUIT_MARKER);
+					serviceChain.getAndUpdate(old -> {
+						dead2.next = old;
+						return dead2;
+					});
+				}
+			}
+		}
+	}
+
+	abstract static class StackElement<T extends StackElement<T>> {
+		T next;
+	}
+
+	static final class Waiting<T> extends StackElement<Waiting<T>> {
+		private static final Object DEAD = new Object();
+		private final AtomicReference<Object> response = new AtomicReference<>();
+		final Thread parked;
+
+		public Waiting(final Thread parked) {
+			this.parked = parked;
+		}
+
+		boolean tryRespond(final T element) {
+			if (response.compareAndSet(null, element)) {
+				LockSupport.unpark(parked);
+				return true;
+			}
+			return false;
+		}
+
+		void abort() {
+			if (response.compareAndSet(null, DEAD)) {
+				LockSupport.unpark(parked);
+			}
+		}
+
+		@SuppressWarnings("unchecked")
+		T get(final long maxWait) {
+			final Object element;
+			try {
+				if ((response.get() == null) && (maxWait > 0)) {
+					final long deadline = System.currentTimeMillis() + maxWait;
+					do {
+						LockSupport.parkUntil(deadline);
+					} while ((response.get() == null) && (System.currentTimeMillis() < deadline));
+					// System.out.println(Thread.currentThread().getId() + " deadline= " + (deadline - System.currentTimeMillis()));
+				}
+			} finally {
+				element = response.getAndSet(DEAD);
+			}
+			if ((element != null) && (element != DEAD)) {
+				return (T) element;
+			}
+
+			return null;
+		}
+
+		boolean isStillWaiting() {
+			return response.get() == null;
+		}
+	}
+
+	static final class TakenElement<T> extends StackElement<TakenElement<T>> {
+		final T element;
+		final long lastUsed;
+		long lastTested;
+
+		public TakenElement(final T e, final long lastUsed, final long lastTested) {
+			this.element = e;
+			this.lastUsed = lastUsed;
+			this.lastTested = lastTested;
+		}
+
+	}
+
+	static final class Ready<T> extends StackElement<Ready<T>> {
+		private final AtomicReference<T> element;
+		long lastUsed;
+		long lastTested;
+
+		public Ready(final T e, final long lastUsed, final long lastTested) {
+			this.element = new AtomicReference<>(e);
+			this.lastUsed = lastUsed;
+			this.lastTested = lastTested;
+		}
+
+		T tryTake() {
+			return element.getAndSet(null);
+		}
+
+		boolean isStillAvailable() {
+			return element.get() != null;
+		}
+
+		TakenElement<T> trySwapValue(final T newValue, final long newLastTested) {
+			final T old = element.get();
+			if ((old != null) && element.compareAndSet(old, newValue)) {
+				final TakenElement<T> re = new TakenElement<>(old, lastUsed, lastTested);
+				lastTested = newLastTested;
+				return re;
+			}
+			return null;
+		}
+	}
+
+	/**
+	 * MultiStackHead supports atomic conditional stack operations on two stacks at once.
+	 * A link's structure must never be modified once a link is put in the stack. It still must
+	 * not be modified after the head is moved forwards. Unlinking is by GC only.
+	 * Existing links may be modified only by changing their contents.
+	 */
+	static final class MultiStackHead<T> {
+		Waiting<T> waiting;
+		Ready<T> ready;
+
+		void setFrom(final MultiStackHead<T> other) {
+			if (other != null) {
+				waiting = other.waiting;
+				ready = other.ready;
+			} else {
+				waiting = null;
+				ready = null;
+			}
+		}
+	}
+}
