@@ -18,9 +18,9 @@ Done:
 - Leak detection
 - Initial stats
 - Crude testing
+- Maven
 
 TODO:
-- Maven
 - JDBC Wrapper classes
 - SQL error monitoring for instant ejection
 - Formal unit tests
