@@ -5,138 +5,65 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
 import java.util.stream.Collectors;
 
+import us.pixelmemory.dp.pool.PoolSettings.LeaksMode;
+
 public class Pool<T, ERR extends Exception> {
-	private static final Servicing servicing = new Servicing();
-	private static final ExecutorService exec = Executors.newCachedThreadPool(r -> {
+	private static final Servicing SERVICING = new Servicing();
+	private static final ExecutorService EXEC = Executors.newCachedThreadPool(r -> {
 		final Thread t = new Thread(r, "Pool async task worker");
 		t.setDaemon(true);
 		return t;
 	});
+	private static final long LEAK_TIME= TimeUnit.HOURS.toMillis(2);
 
-	public enum LeaksMode {
-		OFF, ON, AUTO
-	}
-
-	public enum Profile {
-		TINY, GENTLE, RELIABLE, FAST
-	}
-
-	private final LeaksMode leaksMode;
-	private final long maxIdleMillis;
-	private final long maxUseTime;
-	private final int validateInterval;
-	private final int openBrokenRateMillis; // DoS throttle: Must wait this long between opening elements when the source is broken.
-	private final int openConcurrent;
-	private final int giveUpMillis; // Stall limiting: Give up after this long.
-	private final int giveUpBrokenMillis; // Stall limiting: Give up after failing for this long when failing.
-	private final int maxOpen;
+	
+	private final PoolSettings settings;
 	private final String name;
+	private final PoolSource<T, ERR> source;
+	private final ObjectTracker<T> tracker;
 
-	final AtomicReference<MultiStackHead<T>> head = new AtomicReference<>(new MultiStackHead<>());
-	final PoolSource<T, ERR> source;
-	final ObjectTracker<T> tracker;
-	final Semaphore openSemaphore;
 
+	private final AtomicReference<MultiStackHead<T>> head = new AtomicReference<>(new MultiStackHead<>());
+	private final AtomicInteger pendingOpen = new AtomicInteger(0);
 	private volatile Exception currentFailure = null;
 	private volatile boolean showLeaks;
-	private volatile boolean openingThrottled = false; // Optimization to stop requests for more elements
-	private final AtomicInteger pendingOpen = new AtomicInteger(0);
-	private long lastOpenTime = 0;
+	private volatile boolean openingThrottled = false; // Optimization to silence requests for more elements
+	private volatile long lastLeakTime= 0;
 	private volatile boolean running = true;
+	private long lastOpenTime = 0;	//For use only in Servicing thread
 
-	public Pool(final Profile profile, final PoolSource<T, ERR> source, final String name) {
-		switch (profile) {
-			case TINY:
-				maxOpen = 64;
-				giveUpMillis = 45 * 1000;
-				giveUpBrokenMillis = 1000;
-				maxIdleMillis = 2000;
-				openBrokenRateMillis = 1000;
-				openConcurrent = 2;
-				validateInterval = 30 * 1000;
-				maxUseTime = 15 * 60 * 1000;
-			break;
-			case GENTLE:
-				maxOpen = 200;
-				giveUpMillis = 30 * 1000;
-				giveUpBrokenMillis = 1000;
-				maxIdleMillis = 30 * 1000;
-				openBrokenRateMillis = 500;
-				openConcurrent = 6;
-				validateInterval = 30 * 1000;
-				maxUseTime = 15 * 60 * 1000;
-			break;
-			case RELIABLE:
-				maxOpen = 1000;
-				giveUpMillis = 60 * 1000;
-				giveUpBrokenMillis = 30 * 1000;
-				maxIdleMillis = 60 * 1000;
-				openBrokenRateMillis = 500;
-				openConcurrent = 8;
-				validateInterval = 30 * 1000;
-				maxUseTime = 30 * 60 * 1000;
-			break;
-			case FAST:
-				maxOpen = 1000;
-				giveUpMillis = 5 * 1000;
-				giveUpBrokenMillis = 1 * 1000;
-				maxIdleMillis = 5 * 60 * 1000;
-				openBrokenRateMillis = 250;
-				openConcurrent = 24;
-				validateInterval = 60 * 1000;
-				maxUseTime = 60 * 1000;
-			break;
-			default:
-				throw new IllegalArgumentException("Profile: " + profile);
-		}
 
+	public Pool(final String name, final PoolSource<T, ERR> source, final PoolSettings settings) {
 		this.source = source;
 		this.name = name;
-		this.leaksMode = LeaksMode.AUTO;
-		showLeaks = false;
-		openSemaphore = new Semaphore(maxOpen);
-		tracker = new ObjectTracker<>(3 * maxOpen);
+		showLeaks = settings.leaksMode == LeaksMode.ON;
+		tracker = new ObjectTracker<>(3 * settings.maxOpen);
+		this.settings = settings;
 	}
 
-	public Pool(final int maxOpen, final int openBrokenRateMillis, final int openConcurrent, final int giveUpMillis, final int giveUpBrokenMillis, final long maxIdleMillis, final int validateInterval, final long maxUseTime,
-			final PoolSource<T, ERR> source, final String name, final LeaksMode leaksMode) {
-		this.maxOpen = maxOpen;
-		this.giveUpMillis = giveUpMillis;
-		this.giveUpBrokenMillis = giveUpBrokenMillis;
-		this.maxIdleMillis = maxIdleMillis;
-		this.openBrokenRateMillis = openBrokenRateMillis;
-		this.openConcurrent = openConcurrent;
-		this.validateInterval = validateInterval;
-		this.maxUseTime = maxUseTime;
-		this.source = source;
-		this.name = name;
-		this.leaksMode = leaksMode;
-		showLeaks = leaksMode == LeaksMode.ON;
-		openSemaphore = new Semaphore(openConcurrent);
-		tracker = new ObjectTracker<>(3 * maxOpen);
-	}
-
-	public void put(final T element) {
+	public void takeBack(final T element) {
 		final ObjectTracker.TraceRef<T> traceRef = tracker.getTraceRef(element);
 		final long now = System.currentTimeMillis();
 		final long checkOutTime = traceRef.getTime();
 		final long useTime = now - checkOutTime;
 
-		if (useTime > maxUseTime) {
+		if (useTime > settings.warnLongUseMillis) {
 			// Bad coder held the connection too long.
 			// Name and shame
 			final Throwable t = traceRef.getTrace();
 			if (t != null) {
 				t.printStackTrace();// FIXME
 			}
-			if (leaksMode == LeaksMode.AUTO) {
+			
+			lastLeakTime= System.currentTimeMillis();
+			if (settings.leaksMode == LeaksMode.AUTO) {
 				showLeaks = true;
 			}
 		}
@@ -146,7 +73,7 @@ public class Pool<T, ERR extends Exception> {
 			return;
 		}
 
-		if (useTime > validateInterval) {
+		if (useTime > settings.validateInterval) {
 			asyncValidation(element, now);
 			return;
 		}
@@ -160,14 +87,14 @@ public class Pool<T, ERR extends Exception> {
 		return e;
 	}
 
-	public void discard(final T e) {
-		exec.execute(() -> sendBack(e));
+	public void abandon(final T e) {
+		EXEC.execute(() -> sendBack(e));
 	}
 
 	public void shutdown() {
 		running = false;
 		currentFailure = (RuntimeException) new RuntimeException("Shutdown").fillInStackTrace();
-		servicing.request(this);
+		SERVICING.request(this);
 	}
 
 	public int countWaiting() {
@@ -193,6 +120,10 @@ public class Pool<T, ERR extends Exception> {
 	@Override
 	public String toString() {
 		return "Pool " + name + " (open=" + tracker.count() + " waiting=" + countWaiting() + " available=" + countAvailable() + " opening=" + pendingOpen.get() + " throttled=" + openingThrottled + ")";
+	}
+
+	public String getName() {
+		return name;
 	}
 
 	/**
@@ -234,9 +165,9 @@ public class Pool<T, ERR extends Exception> {
 					throw (RuntimeException) currentFailure;
 				}
 				if (!openingThrottled) {
-					servicing.request(this);
+					SERVICING.request(this);
 				}
-				final T e = w.get((currentFailure == null) ? giveUpMillis : giveUpBrokenMillis);
+				final T e = w.get((currentFailure == null) ? settings.giveUpMillis : settings.giveUpBrokenMillis);
 				if (e == null) {
 					final Exception err = currentFailure;
 					if (err != null) {
@@ -310,7 +241,7 @@ public class Pool<T, ERR extends Exception> {
 	}
 
 	private void asyncValidation(final T e, final long lastUsed) {
-		exec.execute(() -> {
+		EXEC.execute(() -> {
 			final long now = System.currentTimeMillis();
 			if (validate(e)) {
 				push(e, lastUsed, now);
@@ -354,19 +285,35 @@ public class Pool<T, ERR extends Exception> {
 
 	private void collectLeaks() {
 		final List<ObjectTracker.TraceRef<T>> leaks = tracker.collectLeaks();
+		
 		if (leaks.isEmpty()) {
-			return;
-		}
-
-		if (leaksMode == LeaksMode.AUTO) {
-			showLeaks = true;
-		}
-		for (final ObjectTracker.TraceRef<T> ref : leaks) {
-			final Throwable t = ref.getTrace();
-			final long time = ref.getTime();
-			System.out.println("Leak at " + new java.util.Date(time));
-			if (t != null) {
-				t.printStackTrace(); // FIXME
+			switch (settings.leaksMode) {
+				case AUTO:
+					showLeaks= (lastLeakTime + LEAK_TIME) > System.currentTimeMillis();
+					break;
+				case ON:
+					showLeaks= true;
+					break;
+				default:
+					showLeaks= false;
+			}
+		} else {
+			lastLeakTime= System.currentTimeMillis();
+			switch (settings.leaksMode) {
+				case OFF:
+					showLeaks= false;
+					break;
+				default:
+					showLeaks= true;
+			}
+	
+			for (final ObjectTracker.TraceRef<T> ref : leaks) {
+				final Throwable t = ref.getTrace();
+				final long time = ref.getTime();
+				System.out.println("Leak at " + new java.util.Date(time));
+				if (t != null) {
+					t.printStackTrace(); // FIXME
+				}
 			}
 		}
 	}
@@ -387,13 +334,13 @@ public class Pool<T, ERR extends Exception> {
 		} finally {
 			pendingOpen.updateAndGet(c -> ((c > 0) ? c - 1 : 0));
 		}
-		servicing.request(this); // Because throttle may be on
+		SERVICING.request(this); // Because throttle may be on
 		return null;
 	}
 
 	// Not multithread safe
 	private long populate() {
-		final long maxWait = Math.min(maxIdleMillis, validateInterval);
+		final long maxWait = Math.min(settings.maxIdleMillis, settings.validateInterval);
 		try {
 			while (running) {
 				openingThrottled = false; // Do this before counting to make race condition safe
@@ -405,15 +352,15 @@ public class Pool<T, ERR extends Exception> {
 					return tracker.isEmtpy() ? -1 : maxWait;
 				}
 
-				final long errWaitTime = (lastOpenTime + openBrokenRateMillis) - now;
+				final long errWaitTime = (lastOpenTime + settings.openBrokenRateMillis) - now;
 				if ((currentFailure == null) || (errWaitTime < 0)) {
-					if (opening < openConcurrent) {
+					if (opening < settings.openConcurrent) {
 						final int approxTotal = opening + tracker.count();
-						if (approxTotal < maxOpen) {
+						if (approxTotal < settings.maxOpen) {
 							// Can open more
 							if (pendingOpen.compareAndSet(opening, opening + 1)) {
 								lastOpenTime = now;
-								exec.submit(this::create);
+								EXEC.submit(this::create);
 							}
 						} else {
 							// Too many total open
@@ -444,8 +391,8 @@ public class Pool<T, ERR extends Exception> {
 	// Not multithread safe
 	private void cleanIdleReady() {
 		final long now = System.currentTimeMillis();
-		final long retestTime = now - validateInterval;
-		final long idleTime = now - maxIdleMillis;
+		final long retestTime = now - settings.validateInterval;
+		final long idleTime = now - settings.maxIdleMillis;
 		TakenElement<T> testList = null;
 		TakenElement<T> returnList = null;
 
@@ -503,7 +450,7 @@ public class Pool<T, ERR extends Exception> {
 		}
 
 		while (returnList != null) {
-			discard(returnList.element);
+			abandon(returnList.element);
 			returnList = returnList.next;
 		}
 
@@ -602,7 +549,7 @@ public class Pool<T, ERR extends Exception> {
 						}
 
 						if (sleep > 0) {
-							LockSupport.parkNanos(sleep);
+							LockSupport.parkNanos(sleep); // TODO interrupted flag
 						}
 					} while (!nextService.isEmpty());
 				} while (!serviceChain.compareAndSet(null, dead));
@@ -655,7 +602,7 @@ public class Pool<T, ERR extends Exception> {
 					final long deadline = System.currentTimeMillis() + maxWait;
 					do {
 						LockSupport.parkUntil(deadline);
-					} while ((response.get() == null) && (System.currentTimeMillis() < deadline));
+					} while ((response.get() == null) && (System.currentTimeMillis() < deadline) && !Thread.interrupted());
 					// System.out.println(Thread.currentThread().getId() + " deadline= " + (deadline - System.currentTimeMillis()));
 				}
 			} finally {

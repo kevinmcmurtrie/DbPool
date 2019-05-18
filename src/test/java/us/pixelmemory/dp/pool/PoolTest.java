@@ -18,6 +18,8 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import org.junit.Test;
 
+import us.pixelmemory.dp.pool.PoolSettings.Profile;
+
 public class PoolTest {
 
 	static class StringSource implements PoolSource<String, RuntimeException> {
@@ -59,7 +61,7 @@ public class PoolTest {
 
 	@Test
 	public void testTakeGet() throws InterruptedException, ExecutionException, TimeoutException, IOException {
-		final Pool<String, RuntimeException> p = new Pool<>(Pool.Profile.GENTLE, new StringSource(), "testTakeGet");
+		final Pool<String, RuntimeException> p = new Pool<>("testTakeGet", new StringSource(), new PoolSettings(Profile.GENTLE));
 
 		final ConcurrentHashMap<String, Thread> tracker = new ConcurrentHashMap<>();
 		final Future<Object> results[] = new Future[100000];
@@ -79,7 +81,7 @@ public class PoolTest {
 						assertTrue(tracker.remove(e, t));
 
 						if (!leakIt) {
-							p.put(e);
+							p.takeBack(e);
 						}
 						return null;
 					});
