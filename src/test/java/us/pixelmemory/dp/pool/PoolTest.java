@@ -5,7 +5,6 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
-import java.io.IOException;
 import java.util.Collections;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
@@ -17,6 +16,7 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
 
 import org.junit.Test;
+import org.slf4j.impl.SimpleLogger;
 
 import us.pixelmemory.dp.pool.PoolSettings.Profile;
 
@@ -60,8 +60,9 @@ public class PoolTest {
 	}
 
 	@Test
-	public void testTakeGet() throws InterruptedException, ExecutionException, TimeoutException, IOException {
-		final Pool<String, RuntimeException> p = new Pool<>("testTakeGet", new StringSource(), new PoolSettings(Profile.GENTLE));
+	public void testTakeGet() throws InterruptedException, ExecutionException, TimeoutException {
+		System.setProperty(SimpleLogger.DEFAULT_LOG_LEVEL_KEY, "debug");
+		final Pool<String, RuntimeException> p = new Pool<>("testTakeGet", new StringSource(), new PoolSettings().setProfile(Profile.GENTLE));
 
 		final ConcurrentHashMap<String, Thread> tracker = new ConcurrentHashMap<>();
 		final Future<Object> results[] = new Future[100000];

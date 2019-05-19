@@ -42,7 +42,7 @@ public class PoolSettings {
 	 * How to handle leaks. Leak tracing has a performance cost to generate a stack trace
 	 * when an item is taken from the pool .
 	 */
-	public LeaksMode leaksMode;
+	public LeaksMode leaksMode= LeaksMode.AUTO;
 
 	public PoolSettings() {
 		// No-arg for beans
@@ -61,7 +61,7 @@ public class PoolSettings {
 		this.leaksMode = leaksMode;
 	}
 
-	public PoolSettings(final Profile profile) {
+	public PoolSettings setProfile (final Profile profile) {
 		switch (profile) {
 			case TINY:
 				maxOpen = 64;
@@ -106,5 +106,6 @@ public class PoolSettings {
 			default:
 				throw new IllegalArgumentException("Profile: " + profile);
 		}
+		return this;
 	}
 }
