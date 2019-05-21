@@ -46,6 +46,7 @@ public class PoolSettings {
 
 	public PoolSettings() {
 		// No-arg for beans
+		setProfile(Profile.GENTLE);
 	}
 
 	public PoolSettings(final int openConcurrent, final int maxOpen, final long maxIdleMillis, final int validateInterval, final long warnLongUseMillis, final int giveUpMillis, final int openBrokenRateMillis, final int giveUpBrokenMillis,

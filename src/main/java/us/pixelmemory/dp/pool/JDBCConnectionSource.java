@@ -5,17 +5,20 @@ import java.sql.Connection;
 import java.sql.Driver;
 import java.sql.DriverManager;
 import java.sql.SQLException;
+import java.util.Arrays;
+import java.util.Collection;
 import java.util.Enumeration;
+import java.util.Iterator;
 import java.util.Properties;
 import java.util.concurrent.ConcurrentHashMap;
 
-public class StaticConnectionSource implements PoolSource<Connection, SQLException> {
+public class JDBCConnectionSource implements PoolSource<Connection, SQLException> {
 	private static final ConcurrentHashMap<String, CacheElement<Driver>> driverByName = new ConcurrentHashMap<>();
 	private static final ConcurrentHashMap<String, CacheElement<Driver>> driverByUrl = new ConcurrentHashMap<>();
 
-	private final JDBCSettings settings;
+	private final JDBCConnectionSettings settings;
 
-	public StaticConnectionSource(final JDBCSettings settings) {
+	public JDBCConnectionSource(final JDBCConnectionSettings settings) {
 		this.settings = settings;
 	}
 
@@ -42,6 +45,19 @@ public class StaticConnectionSource implements PoolSource<Connection, SQLExcepti
 
 	@Override
 	public void shutdown() {
+		for (Collection<CacheElement<Driver>> cache : Arrays.asList(driverByName.values(), driverByUrl.values())) {
+			final Iterator<CacheElement<Driver>> itr = cache.iterator();
+			while (itr.hasNext()) {
+				final CacheElement<Driver> ce = itr.next();
+				final boolean remove;
+				synchronized (ce) {
+					remove = (ce.ref != null) && (ce.ref.get() == null);
+				}
+				if (remove) {
+					itr.remove();
+				}
+			}
+		}
 	}
 
 	protected Driver getDriver() throws SQLException {

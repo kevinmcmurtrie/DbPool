@@ -25,15 +25,29 @@ import java.util.concurrent.TimeoutException;
  * Public code
  */
 public class ConnectionWrapper implements Connection {
+	
+	@FunctionalInterface
+	public interface Restoration {
+		/**
+		 * Restore a connection to its original state.
+		 * For example, Turn on auto-commit and reset session variables
+		 * @param c
+		 * @throws SQLException
+		 */
+		void restoreConnection (Connection c) throws SQLException;
+	}
+	
+	public static Restoration BASIC_RESTORATION= c -> {c.setAutoCommit(true); c.clearWarnings();};
+	public static Restoration NO_RESTORATION= c -> {};
 
 	private final Pool<Connection, SQLException> pool;
-	private final boolean commitOnReturn;
+	private final Restoration restoration;
 	private Connection rawConnection;
 	private boolean isDamaged = false;
 
-	public ConnectionWrapper(final Pool<Connection, SQLException> pool, final boolean commitOnReturn) throws SQLException {
+	public ConnectionWrapper(final Pool<Connection, SQLException> pool, final Restoration restoration) throws SQLException {
 		this.pool = pool;
-		this.commitOnReturn = commitOnReturn;
+		this.restoration = restoration;
 		try {
 			rawConnection = pool.get();
 		} catch (final TimeoutException e) {
@@ -145,11 +159,10 @@ public class ConnectionWrapper implements Connection {
 		if (c != null) {
 			rawConnection = null;
 			try {
-				if (commitOnReturn) {
-					c.commit();
-				}
-			} catch (final SQLException e) {
-				throw interceptError(e);
+				restoration.restoreConnection(c);
+			} catch (final RuntimeException | SQLException e) {
+				isDamaged= true;
+				throw e;
 			} finally {
 				if (!isDamaged) {
 					pool.takeBack(c);
@@ -534,12 +547,32 @@ public class ConnectionWrapper implements Connection {
 	 * @return SQLException provided as input
 	 */
 	protected SQLException interceptError(final SQLException error) {
+		final int code = error.getErrorCode();
 		final String state = error.getSQLState();
-		if (state != null) {
-			if (state.startsWith("08")) {
-				// 08xxx codes are connection/protocol errors
+		final String db;
+		try {
+			db = rawConnection.getMetaData().getDatabaseProductName();
+		} catch (SQLException e) {
+			setDamaged();
+			return error;
+		}
+
+		final String errClass = ((state != null) && (state.length() >= 2)) ? state.substring(0, 2) : "none";
+
+
+		switch (errClass) {
+			case "08": // General socket/connection/protocol errors
 				setDamaged();
-			} else if (state.equals("HY000")) {
+			break;
+			default:
+			break;
+		}
+
+		if ("MySQL".equals(db)) {
+			// Work on MySQL error handling is incomplete because the official documentation
+			// no longer classifies by type.
+
+			if ("HY000".equals(state)) {
 				// State HY000 is a vendor-specific class for MySQL - http://dev.mysql.com/doc/refman/5.7/en/error-messages-client.html
 				// Most codes are fine with generic error handling.
 				// Just check for special states that may be seen during maintenance.
@@ -548,12 +581,41 @@ public class ConnectionWrapper implements Connection {
 					case 1290: // Runtime option prevents statement
 					case 2006: // Gone away
 						setDamaged();
-						break;
+					break;
 					default:
-						break;
+					break;
 				}
 			}
+		} else if ("PostgreSQL".equals(db)) {
+			switch (errClass) {
+				case "28": // authorization failures
+				case "53": // Insufficient Resources
+				case "54": // Program Limit Exceeded
+				case "57": // Operator Intervention
+				case "58": // System Error
+				case "F0": // Configuration File Error
+				case "XX": // Internal error
+					setDamaged();
+				break;
+				default:
+				break;
+			}
+		} else if ("HSQL Database Engine".equals(db)) {
+			// From ErrorCode.class. Code is negated when thrown.
+			switch (code) {
+				case -401: // Transfer corrupted
+				case -402: // database disconnected
+				case -403: // Old client
+				case -406: // Bad handshake
+				case -4872: // statement execution aborted: timeout reached
+				case -6500: // Unknown Error: Catch-All
+					setDamaged();
+				break;
+				default:
+				break;
+			}
 		}
+
 		return error;
 	}
 }

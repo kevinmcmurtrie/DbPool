@@ -112,6 +112,14 @@ public class Pool<T, ERR extends Exception> {
 	public int countAvailable() {
 		return count(head.get().ready);
 	}
+	
+	public int size () {
+		return tracker.count();
+	}
+	
+	public int countOpening() {
+		return pendingOpen.get();
+	}
 
 	@Override
 	public String toString() {

@@ -2,7 +2,7 @@ package us.pixelmemory.dp.pool;
 
 import java.util.Map;
 
-public class JDBCSettings {
+public class JDBCConnectionSettings {
 	public String url;
 	public String driverClass= null;
 	public String user;
@@ -10,11 +10,11 @@ public class JDBCSettings {
 	public Map<String, String> properties= null;
 	public int validationTimeoutSeconds= 15;
 	
-	public JDBCSettings () {
+	public JDBCConnectionSettings () {
 		//Bean
 	}
 
-	public JDBCSettings(String url, String driverClass, String user, String pass, Map<String, String> properties, int validationTimeoutSeconds) {
+	public JDBCConnectionSettings(String url, String driverClass, String user, String pass, Map<String, String> properties, int validationTimeoutSeconds) {
 		this.url = url;
 		this.driverClass = driverClass;
 		this.user = user;
