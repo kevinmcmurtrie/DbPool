@@ -28,8 +28,12 @@ public class JDBCConnectionSource implements PoolSource<Connection, SQLException
 		if (settings.properties != null) {
 			p.putAll(settings.properties);
 		}
-		p.setProperty("user", settings.user);
-		p.setProperty("password", settings.pass);
+		if (settings.user != null) {
+			p.setProperty("user", settings.user);
+		}
+		if (settings.pass != null) {
+			p.setProperty("password", settings.pass);
+		}
 		return getDriver().connect(settings.url, p);
 	}
 

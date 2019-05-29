@@ -18,6 +18,22 @@ import org.slf4j.LoggerFactory;
 
 import us.pixelmemory.dp.pool.PoolSettings.LeaksMode;
 
+/**
+ * Simple Object pool with no synchronization locks at all.
+ * 
+ * Acquisition is LIFO.  This means that most requests will finish instantly but a lack of resources
+ * will cause some to timeout.  It's not "fair" but it makes the pool MUCH simpler and faster.  You shouldn't
+ * be starving for resources anyways.
+ * 
+ * Object creation is asynchronous.  This means that a returned connection can always unblock
+ * a waiting thread.  No thread will be stuck waiting on that one resource that is taking forever
+ * to create.
+ * 
+ * @author Kevin McMurtrie
+ *
+ * @param <T>
+ * @param <ERR>
+ */
 public class Pool<T, ERR extends Exception> {
 	private static final Servicing SERVICING = new Servicing();
 	private static final ExecutorService EXEC = Executors.newCachedThreadPool(r -> {
@@ -258,7 +274,7 @@ public class Pool<T, ERR extends Exception> {
 		try {
 			return source.validate(e);
 		} catch (final Exception err) {
-			err.printStackTrace();
+			log.warn("Failed to validate", err);
 			return false;
 		}
 	}
@@ -334,6 +350,7 @@ public class Pool<T, ERR extends Exception> {
 		} catch (final Exception err) {
 			if (running) {
 				currentFailure = err;
+				log.warn("Failed to create", err);
 			}
 		} finally {
 			pendingOpen.updateAndGet(c -> ((c > 0) ? c - 1 : 0));

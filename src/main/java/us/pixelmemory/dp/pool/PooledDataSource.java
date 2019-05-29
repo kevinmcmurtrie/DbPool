@@ -22,6 +22,7 @@ public class PooledDataSource implements DataSource {
 	private final String name;
 	private final Restoration restoration;
 	private final Logger log;
+	private volatile boolean shutdown= false;
 
 	
 	public PooledDataSource(String name, PoolSettings poolSettings, JDBCConnectionSettings jdbcSettings, final Restoration restoration) {
@@ -45,6 +46,7 @@ public class PooledDataSource implements DataSource {
 	@Override
 	public void setLoginTimeout(int seconds) throws SQLException {
 		poolSettings.giveUpMillis= 1000 * seconds;
+		poolSettings.giveUpBrokenMillis = 1 + poolSettings.giveUpMillis / 4;
 	}
 
 	@Override
@@ -87,7 +89,12 @@ public class PooledDataSource implements DataSource {
 	}	
 
 	public void shutdown() {
+		shutdown= true;
 		resetPool();
+	}
+	
+	public void startUp() {
+		shutdown= false;
 	}
 
 	public String getName() {
@@ -126,6 +133,10 @@ public class PooledDataSource implements DataSource {
 				return p;
 			}
 
+			if (shutdown) {
+				throw new IllegalStateException ("Shutdown");
+			}
+			
 			p = new Pool<>(name, new JDBCConnectionSource(jdbcSettings), poolSettings);
 			if (poolRef.compareAndSet(null, p)) {
 				log.info("Created pool");

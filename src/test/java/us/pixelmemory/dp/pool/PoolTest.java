@@ -3,7 +3,9 @@ package us.pixelmemory.dp.pool;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 import java.util.Collections;
 import java.util.concurrent.ConcurrentHashMap;
@@ -16,7 +18,6 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
 
 import org.junit.Test;
-import org.slf4j.impl.SimpleLogger;
 
 import us.pixelmemory.dp.pool.PoolSettings.Profile;
 
@@ -58,10 +59,66 @@ public class PoolTest {
 			assertEquals(Collections.emptyMap(), tracker);
 		}
 	}
+	
+	
+	static class ErrorSource implements PoolSource<String, RuntimeException> {
+		@Override
+		public String get() throws RuntimeException {
+			throw new RuntimeException ("Broken source");
+		}
+
+		@Override
+		public void takeBack(final String element) throws RuntimeException {
+			fail("Nothing to take back");
+		}
+
+		@Override
+		public boolean validate(final String element) throws RuntimeException {
+			fail("Nothing to validate");
+			return true;
+		}
+
+		@Override
+		public void shutdown() throws RuntimeException {
+		}
+	}
+	
+	@Test
+	public void testBrokenSource () {
+		PoolSettings settings= new PoolSettings().setProfile(Profile.GENTLE);
+		settings.giveUpMillis= 100;
+		settings.giveUpBrokenMillis= 1;
+		
+		final Pool<String, RuntimeException> p = new Pool<>("testTakeGet", new ErrorSource(), settings);
+		
+		long t1= System.currentTimeMillis();
+		try {
+			p.get();
+		} catch (RuntimeException ok) {
+			//Good
+		} catch (TimeoutException e) {
+			fail(e.getMessage());
+		}
+		
+		long t2= System.currentTimeMillis();
+		assertTrue((t2 - t1) < 1000);
+		
+
+		try {
+			p.get();
+		} catch (RuntimeException ok) {
+			//Good
+		} catch (TimeoutException e) {
+			fail(e.getMessage());
+		}
+		
+		long t3= System.currentTimeMillis();
+		assertTrue((t3 - t2) < 100);
+	}
+	
 
 	@Test
 	public void testTakeGet() throws InterruptedException, ExecutionException, TimeoutException {
-		System.setProperty(SimpleLogger.DEFAULT_LOG_LEVEL_KEY, "debug");
 		final Pool<String, RuntimeException> p = new Pool<>("testTakeGet", new StringSource(), new PoolSettings().setProfile(Profile.GENTLE));
 
 		final ConcurrentHashMap<String, Thread> tracker = new ConcurrentHashMap<>();

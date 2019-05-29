@@ -1,0 +1,27 @@
+---
+# DwPooledDataSourceFactory
+database:
+   openConcurrent: 4
+   maxOpen: 20
+   maxIdleMillis: 30000
+   validationInterval : 15s
+   warnLongUseMillis : 20000
+   giveUpMillis : 10000
+   openBrokenRateMillis : 1000
+   giveUpBrokenMillis : 100
+   leaksMode: AUTO
+   driverClass: org.hsqldb.jdbc.JDBCDriver
+   user: SA
+   pass:
+   validationQueryTimeout: 5s
+   url: jdbc:hsqldb:mem:dwtest
+   properties:
+      shutdown: true
+      create: true
+
+      
+server:
+  applicationConnectors:
+    - type: http
+      port: 0
+      bindHost: 127.0.0.1 # only bind to loopback

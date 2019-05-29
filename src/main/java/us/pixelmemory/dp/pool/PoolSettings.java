@@ -13,36 +13,36 @@ public class PoolSettings {
 	 * How many connections may open concurrently.
 	 * This throttles load spikes that will clear faster using recycled connections than new connections
 	 */
-	public int openConcurrent;
+	int openConcurrent;
 
 	/** Maximum number that may open */
-	public int maxOpen;
+	int maxOpen;
 
 	/** How long an extra connection may be idle before it is removed from the pool */
-	public long maxIdleMillis;
+	long maxIdleMillis;
 	/** How long a connection may be in idle or out of the pool before it should be validated */
-	public int validateInterval;
+	int validateInterval;
 
 	/** Connections used for this long will activate leaks checking and log */
-	public long warnLongUseMillis;
+	long warnLongUseMillis;
 
 	/** Callers will receive a TimeoutException or driver error if a connection isn't available after this long */
-	public int giveUpMillis;
+	int giveUpMillis;
 
 	/** Throttle each new connection to this rate if the source is failing. This prevents a DoS attack. */
-	public int openBrokenRateMillis;
+	int openBrokenRateMillis;
 
 	/**
 	 * Callers will receive a TimeoutException or driver error if a connection isn't
 	 * available after this long, when the source is broken
 	 */
-	public int giveUpBrokenMillis;
+	int giveUpBrokenMillis;
 
 	/**
 	 * How to handle leaks. Leak tracing has a performance cost to generate a stack trace
 	 * when an item is taken from the pool .
 	 */
-	public LeaksMode leaksMode= LeaksMode.AUTO;
+	LeaksMode leaksMode= LeaksMode.AUTO;
 
 	public PoolSettings() {
 		// No-arg for beans
@@ -60,6 +60,18 @@ public class PoolSettings {
 		this.openBrokenRateMillis = openBrokenRateMillis;
 		this.giveUpBrokenMillis = giveUpBrokenMillis;
 		this.leaksMode = leaksMode;
+	}
+	
+	public PoolSettings(PoolSettings other) {
+		this.openConcurrent = other.openConcurrent;
+		this.maxOpen = other.maxOpen;
+		this.maxIdleMillis = other.maxIdleMillis;
+		this.validateInterval = other.validateInterval;
+		this.warnLongUseMillis = other.warnLongUseMillis;
+		this.giveUpMillis = other.giveUpMillis;
+		this.openBrokenRateMillis = other.openBrokenRateMillis;
+		this.giveUpBrokenMillis = other.giveUpBrokenMillis;
+		this.leaksMode = other.leaksMode;
 	}
 
 	public PoolSettings setProfile (final Profile profile) {
@@ -109,4 +121,78 @@ public class PoolSettings {
 		}
 		return this;
 	}
+
+	public int getOpenConcurrent() {
+		return openConcurrent;
+	}
+
+	public void setOpenConcurrent(int openConcurrent) {
+		this.openConcurrent = openConcurrent;
+	}
+
+	public int getMaxOpen() {
+		return maxOpen;
+	}
+
+	public void setMaxOpen(int maxOpen) {
+		this.maxOpen = maxOpen;
+	}
+
+	public long getMaxIdleMillis() {
+		return maxIdleMillis;
+	}
+
+	public void setMaxIdleMillis(long maxIdleMillis) {
+		this.maxIdleMillis = maxIdleMillis;
+	}
+
+	public int getValidateInterval() {
+		return validateInterval;
+	}
+
+	public void setValidateInterval(int validateInterval) {
+		this.validateInterval = validateInterval;
+	}
+
+	public long getWarnLongUseMillis() {
+		return warnLongUseMillis;
+	}
+
+	public void setWarnLongUseMillis(long warnLongUseMillis) {
+		this.warnLongUseMillis = warnLongUseMillis;
+	}
+
+	public int getGiveUpMillis() {
+		return giveUpMillis;
+	}
+
+	public void setGiveUpMillis(int giveUpMillis) {
+		this.giveUpMillis = giveUpMillis;
+	}
+
+	public int getOpenBrokenRateMillis() {
+		return openBrokenRateMillis;
+	}
+
+	public void setOpenBrokenRateMillis(int openBrokenRateMillis) {
+		this.openBrokenRateMillis = openBrokenRateMillis;
+	}
+
+	public int getGiveUpBrokenMillis() {
+		return giveUpBrokenMillis;
+	}
+
+	public void setGiveUpBrokenMillis(int giveUpBrokenMillis) {
+		this.giveUpBrokenMillis = giveUpBrokenMillis;
+	}
+
+	public LeaksMode getLeaksMode() {
+		return leaksMode;
+	}
+
+	public void setLeaksMode(LeaksMode leaksMode) {
+		this.leaksMode = leaksMode;
+	}
+	
+	
 }
