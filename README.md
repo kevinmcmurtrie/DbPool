@@ -19,14 +19,15 @@ Done:
 - Initial stats
 - Crude testing
 - Maven
-
-TODO:
 - JDBC Wrapper classes
 - SQL error monitoring for instant ejection
-- Formal unit tests
 - Optimize service thread use
-- Configuration beans for DI systems
 - Logging
-- Monitoring
+- Configuration beans for DI systems
+- DropWizard & JDBI integration test
+
+TODO:
+- Formal unit tests
+- Monitoring tests
 - "Where are they?" dump
 - Clean-up
