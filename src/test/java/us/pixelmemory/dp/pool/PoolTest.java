@@ -232,7 +232,7 @@ public class PoolTest {
 	@Test
 	public void testAging() throws InterruptedException, ExecutionException, TimeoutException {
 		PoolSettings settings= new PoolSettings().setProfile(Profile.GENTLE);
-		settings.validateInterval= 400;
+		settings.setValidateInterval(400);
 		
 		final Pool<String, RuntimeException> p = new Pool<>("testAging", new NoReuseSource(), settings);
 
@@ -259,7 +259,7 @@ public class PoolTest {
 					result.get(5, TimeUnit.MINUTES);
 				}
 				
-				final long w= System.currentTimeMillis() + 1000;
+				//Keep one active while the others are idle.  Makes cleanup harder.
 				do {
 					final Thread t = Thread.currentThread();
 					final String e = p.get();
@@ -267,10 +267,14 @@ public class PoolTest {
 					Thread.yield();
 					assertTrue(tracker.remove(e, t));
 					p.takeBack(e);
-				} while (System.currentTimeMillis() < w);
+				} while (p.countAvailable() > 1);
 			}
 			
 			Thread.sleep(1000);
+			assertEquals(0, p.size());
+			assertEquals(0, p.countAvailable());
+			assertEquals(0, p.countOpening());
+			assertEquals(0, p.countWaiting());
 		} finally {
 			p.shutdown();
 			exec.shutdown();
@@ -280,7 +284,7 @@ public class PoolTest {
 	@Test
 	public void testIdle() throws InterruptedException, ExecutionException, TimeoutException {
 		PoolSettings settings= new PoolSettings().setProfile(Profile.GENTLE);
-		settings.maxIdleMillis= 400;
+		settings.setMaxIdleMillis(400);
 		
 		final Pool<String, RuntimeException> p = new Pool<>("testIdle", new GoodSource(), settings);
 
@@ -307,7 +311,7 @@ public class PoolTest {
 					result.get(5, TimeUnit.MINUTES);
 				}
 				
-				final long w= System.currentTimeMillis() + 1000;
+				//Keep one active while the others are idle.  Makes cleanup harder.
 				do {
 					final Thread t = Thread.currentThread();
 					final String e = p.get();
@@ -315,10 +319,14 @@ public class PoolTest {
 					Thread.yield();
 					assertTrue(tracker.remove(e, t));
 					p.takeBack(e);
-				} while (System.currentTimeMillis() < w);
+				} while (p.countAvailable() > 1);
+				
+				Thread.sleep(1000);
+				assertEquals(0, p.size());
+				assertEquals(0, p.countAvailable());
+				assertEquals(0, p.countOpening());
+				assertEquals(0, p.countWaiting());
 			}
-			
-			Thread.sleep(1000);
 		} finally {
 			p.shutdown();
 			exec.shutdown();
@@ -328,8 +336,12 @@ public class PoolTest {
 
 	@Test
 	public void testTakeGet() throws InterruptedException, ExecutionException, TimeoutException {
-		final Pool<String, RuntimeException> p = new Pool<>("testTakeGet", new GoodSource(), new PoolSettings().setProfile(Profile.GENTLE));
-
+		final PoolSettings settings= new PoolSettings().setProfile(Profile.GENTLE);
+		settings.setMaxIdleMillis(100);
+		settings.setGiveUpMillis(60000);
+		final GoodSource src= new GoodSource();
+		final Pool<String, RuntimeException> p = new Pool<>("testTakeGet", src, settings);
+		
 		final ConcurrentHashMap<String, Thread> tracker = new ConcurrentHashMap<>();
 		final Future<Object> results[] = new Future[100000];
 
@@ -347,7 +359,9 @@ public class PoolTest {
 						Thread.sleep(5);
 						assertTrue(tracker.remove(e, t));
 
-						if (!leakIt) {
+						if (leakIt) {
+							src.takeBack(e); //The source is checking balance.  Return leaks to it.
+						} else {
 							p.takeBack(e);
 						}
 						return null;
@@ -358,8 +372,18 @@ public class PoolTest {
 					result.get(5, TimeUnit.MINUTES);
 				}
 			}
-
+			
+			for (int i= 0; (p.size() != 0) && (i < 10); ++i) {
+				System.gc();
+				System.out.println("GC");
+				Thread.sleep(100);
+			}
+			assertEquals(0, p.size());
+			assertEquals(0, p.countAvailable());
+			assertEquals(0, p.countOpening());
+			assertEquals(0, p.countWaiting());
 		} finally {
+			System.out.println("shutdown");
 			p.shutdown();
 			exec.shutdown();
 		}
