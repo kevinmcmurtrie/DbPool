@@ -25,9 +25,9 @@ Done:
 - Logging
 - Configuration beans for DI systems
 - DropWizard & JDBI integration test
+- Formal unit tests
 
 TODO:
-- Formal unit tests
 - Monitoring tests
 - "Where are they?" dump
 - Clean-up
