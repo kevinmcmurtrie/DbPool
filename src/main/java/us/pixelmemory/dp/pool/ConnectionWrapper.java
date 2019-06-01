@@ -23,6 +23,11 @@ import java.util.concurrent.TimeoutException;
 /**
  * Kevin McMurtrie
  * Public code
+ * 
+ * Wraps a connection after it comes out of a pool.
+ * This wrapper is never re-used because bad code might call close() then try to use it again.
+ * If that happened, multiple threads could be sharing the same wrapper.
+ * This object stops working before the raw connection is returned to the pool.
  */
 public class ConnectionWrapper implements Connection {
 	
