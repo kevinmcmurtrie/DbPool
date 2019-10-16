@@ -43,6 +43,12 @@ public class PoolSettings {
 	 * when an item is taken from the pool .
 	 */
 	LeaksMode leaksMode= LeaksMode.AUTO;
+	
+	/**
+	 * Use first-in, first-out waiting for connections.
+	 * This is more fair but slows down with a large number of waiting threads
+	 */
+	boolean fifo= true;
 
 	public PoolSettings() {
 		// No-arg for beans
@@ -50,7 +56,7 @@ public class PoolSettings {
 	}
 
 	public PoolSettings(final int openConcurrent, final int maxOpen, final long maxIdleMillis, final int validateInterval, final long warnLongUseMillis, final int giveUpMillis, final int openBrokenRateMillis, final int giveUpBrokenMillis,
-			final LeaksMode leaksMode) {
+			final LeaksMode leaksMode, final boolean fifo) {
 		this.openConcurrent = openConcurrent;
 		this.maxOpen = maxOpen;
 		this.maxIdleMillis = maxIdleMillis;
@@ -60,6 +66,7 @@ public class PoolSettings {
 		this.openBrokenRateMillis = openBrokenRateMillis;
 		this.giveUpBrokenMillis = giveUpBrokenMillis;
 		this.leaksMode = leaksMode;
+		this.fifo= fifo;
 	}
 	
 	public PoolSettings(PoolSettings other) {
@@ -72,6 +79,7 @@ public class PoolSettings {
 		this.openBrokenRateMillis = other.openBrokenRateMillis;
 		this.giveUpBrokenMillis = other.giveUpBrokenMillis;
 		this.leaksMode = other.leaksMode;
+		this.fifo= other.fifo;
 	}
 
 	public PoolSettings setProfile (final Profile profile) {
@@ -85,6 +93,7 @@ public class PoolSettings {
 				openConcurrent = 2;
 				validateInterval = 30 * 1000;
 				warnLongUseMillis = 15 * 60 * 1000;
+				fifo= true;
 			break;
 			case GENTLE:
 				maxOpen = 200;
@@ -95,6 +104,7 @@ public class PoolSettings {
 				openConcurrent = 6;
 				validateInterval = 30 * 1000;
 				warnLongUseMillis = 15 * 60 * 1000;
+				fifo= true;
 			break;
 			case RELIABLE:
 				maxOpen = 1000;
@@ -105,6 +115,7 @@ public class PoolSettings {
 				openConcurrent = 8;
 				validateInterval = 30 * 1000;
 				warnLongUseMillis = 30 * 60 * 1000;
+				fifo= true;
 			break;
 			case FAST:
 				maxOpen = 1000;
@@ -115,6 +126,7 @@ public class PoolSettings {
 				openConcurrent = 24;
 				validateInterval = 60 * 1000;
 				warnLongUseMillis = 60 * 1000;
+				fifo= false;
 			break;
 			default:
 				throw new IllegalArgumentException("Profile: " + profile);
@@ -194,5 +206,7 @@ public class PoolSettings {
 		this.leaksMode = leaksMode;
 	}
 	
-	
+	public void setFifo (final boolean fifo) {
+		this.fifo= fifo;
+	}
 }

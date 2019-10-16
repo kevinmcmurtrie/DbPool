@@ -11,6 +11,7 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
+import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
 import org.slf4j.Logger;
@@ -34,6 +35,7 @@ import us.pixelmemory.dp.pool.PoolSettings.LeaksMode;
  * @param <T>
  * @param <ERR>
  */
+
 public class Pool<T, ERR extends Exception> {
 	private static final Servicing SERVICING = new Servicing();
 	private static final ExecutorService EXEC = Executors.newCachedThreadPool(r -> {
@@ -122,7 +124,7 @@ public class Pool<T, ERR extends Exception> {
 	}
 
 	public int countWaiting() {
-		return count(head.get().waiting);
+		return filteredCount(head.get().waiting, Waiting::isAlive);
 	}
 
 	public int countAvailable() {
@@ -203,8 +205,80 @@ public class Pool<T, ERR extends Exception> {
 			}
 		}
 	}
-
+	
 	private void push(final T e, final long lastUsed, final long lastTested) {
+		if (settings.fifo) {
+			pushFair(e, lastUsed, lastTested);
+		} else {
+			pushUnfair(e, lastUsed, lastTested);
+		}
+	}
+
+	private void pushFair(final T e, final long lastUsed, final long lastTested) {
+		final Ready<T> r = new Ready<>(e, lastUsed, lastTested);
+
+		while (true) {
+			Waiting<T> waiting;
+			
+			//Try pulling a waiting thread from tail the easy way.
+			while ((waiting= lastWaiting(head.get().waiting)) != null) {
+				// This fails on races and needs to be retired
+				if (waiting.tryRespond(e)) {
+					//At last valid item so truncate list
+					waiting.next= null;
+					return;
+				}
+			}
+			
+			//That didn't work.  Try with CAS that can pull waiting or add to ready.
+			final MultiStackHead<T> original = swapMultiHead(h -> {
+				if (h.waiting != null) {
+					if (h.waiting.next == null) {
+						// Consume solo
+						h.waiting = null;
+					} else {
+						// Skip dead
+						if (h.waiting.isDead()) {
+							h.waiting = h.waiting.next;
+							while ((h.waiting != null) && h.waiting.isDead()) {
+								h.waiting = h.waiting.next;
+							}
+						}
+					}
+				} else {
+					// Insert the ready element
+					r.next = h.ready;
+					h.ready = r;
+				}
+			});
+			
+			if (original.waiting == null) {
+				return;  //Added to ready element list.  Done.
+			}
+			
+			while ((waiting= lastWaiting(original.waiting)) != null) {
+				// This fails on races and needs to be retired
+				if (waiting.tryRespond(e)) {
+					//At last valid item so truncate list
+					waiting.next= null;
+					return;
+				}
+			}
+		}
+	}
+	
+	//Skip to last alive, being careful to not NPE with live truncation
+	private Waiting<T> lastWaiting(Waiting<T> waiting) {
+		Waiting<T> last = null;
+		for (Waiting<T> f = waiting; (f != null); f = f.next) {
+			if (f.isAlive()) {
+				last = f;
+			}
+		}
+		return last;
+	}
+	
+	private void pushUnfair(final T e, final long lastUsed, final long lastTested) {
 		final Ready<T> r = new Ready<>(e, lastUsed, lastTested);
 
 		while (true) {
@@ -355,27 +429,24 @@ public class Pool<T, ERR extends Exception> {
 		} finally {
 			pendingOpen.updateAndGet(c -> ((c > 0) ? c - 1 : 0));
 		}
-		SERVICING.request(this); // Because throttle may be on
+		SERVICING.request(this); // There may be more waiting but there was a concurrency throttle
 		return null;
 	}
-
-	// Not multithread safe
+	
+	//For service thread
 	private long populate() {
 		final long maxWait = Math.min(settings.maxIdleMillis, settings.validateInterval);
 		try {
 			while (running) {
 				openingThrottled = false; // Do this before counting to make race condition safe
-				final long now = System.currentTimeMillis();
-				final int waiting = countWaiting();
+				
 				final int opening = pendingOpen.get();
-
-				if (opening >= waiting) {
-					if (log.isDebugEnabled()) {
-						log.debug("OK: Total={}, Opening={}, Waiting={}, Since last open={}", opening + tracker.count(), opening, waiting, now-lastOpenTime);
-					}
+				if (!overCount(head.get().waiting, opening)) {
 					return tracker.isEmtpy() ? -1 : maxWait;
 				}
-
+				
+				final boolean debug= log.isDebugEnabled();
+				final long now = System.currentTimeMillis();
 				final long errWaitTime = (lastOpenTime + settings.openBrokenRateMillis) - now;
 				if ((currentFailure == null) || (errWaitTime < 0)) {
 					if (opening < settings.openConcurrent) {
@@ -384,32 +455,35 @@ public class Pool<T, ERR extends Exception> {
 							// Can open more
 							if (pendingOpen.compareAndSet(opening, opening + 1)) {
 								EXEC.submit(this::create);
-								if (log.isDebugEnabled()) {
-									log.debug("Opening: Total={}, Opening={}, Waiting={}, Since last open={}", approxTotal, opening+1, waiting, now-lastOpenTime);
+								if (debug) {
+									log.debug("Opening: Total={}, Opening={}, Waiting={}, Since last open={}", approxTotal, opening+1, countWaiting(), now-lastOpenTime);
 								}
 								lastOpenTime = now;
 							}
 						} else {
 							// Too many total open
 							openingThrottled = true;
-							if (log.isDebugEnabled()) {
-								log.debug("Max total: Total={}, Opening={}, Waiting={}, Since last open={}", approxTotal, opening, waiting, now-lastOpenTime);
+							if (debug) {
+								log.debug("Max total: Total={}, Opening={}, Waiting={}, Since last open={}", approxTotal, opening, countWaiting(), now-lastOpenTime);
 							}
 							return maxWait;
 						}
 					} else {
 						// Opening too many at once
 						openingThrottled = true;
-						if (log.isDebugEnabled()) {
-							log.debug("Opening throttled: Total={}, Opening={}, Waiting={}, Since last open={}", opening + tracker.count(), opening, waiting, now-lastOpenTime);
+						if (debug) {
+							log.debug("Opening throttled: Total={}, Opening={}, Waiting={}, Since last open={}", opening + tracker.count(), opening, countWaiting(), now-lastOpenTime);
 						}
+						//This isn't really the correct sleep time because serving should wake up
+						//as soon as a connection finishes opening.
+						//create() will fix this by requesting a service.
 						return maxWait;
 					}
 				} else {
 					// Error mode and thorttled
 					openingThrottled = true;
-					if (log.isDebugEnabled()) {
-						log.debug("Error thorttled: Total={}, Opening={}, Waiting={}, Since last open={}", opening + tracker.count(), opening, waiting, now-lastOpenTime);
+					if (debug) {
+						log.debug("Error thorttled: Total={}, Opening={}, Waiting={}, Since last open={}", opening + tracker.count(), opening, countWaiting(), now-lastOpenTime);
 					}
 					return Math.min(errWaitTime, maxWait);
 				}
@@ -425,7 +499,7 @@ public class Pool<T, ERR extends Exception> {
 		return 100;
 	}
 
-	// Not multithread safe
+	//For service thread
 	private long idleValidations() {
 		final long now = System.currentTimeMillis();
 		final long retestTime = now - settings.validateInterval;
@@ -436,7 +510,7 @@ public class Pool<T, ERR extends Exception> {
 
 		TakenElement<T> top;
 		do {
-			// Examine the top of the ready stack. This can be popped off.
+			// Take a valid element out of the pool's head that can be used as a substitute for expired/bad items later in the list.
 			while ((top = tryPop()) != null) {
 				// Can't modify the ready structure except the head but the contents of the link can be swapped.
 				// Pop a link off the head and use it as a replacement.
@@ -531,6 +605,35 @@ public class Pool<T, ERR extends Exception> {
 			e= e.next;
 		}
 		return count;
+	}
+	
+	private <LINK extends Link<LINK>> int filteredCount (LINK e, Predicate<LINK> filter) {
+		int count= 0;
+		while (e != null) {
+			if (filter.test(e)) {
+				count++;
+			}
+			e= e.next;
+		}
+		return count;
+	}
+	
+	/**
+	 * Maybe a bit faster than count for long lists. 
+	 * @param e
+	 * @param limit
+	 * @return true if the link is longer than the supplied limit 
+	 */
+	private boolean overCount (Link<?> e, int limit) {
+		int c= 0;
+		while (e != null) {
+			c++;
+			if (c > limit) {
+				return true;
+			}
+			e= e.next;
+		}
+		return false;
 	}
 
 	static class Servicing {
@@ -673,8 +776,12 @@ public class Pool<T, ERR extends Exception> {
 			return null;
 		}
 
-		boolean isStillWaiting() {
+		boolean isAlive() {
 			return response.get() == null;
+		}
+		
+		boolean isDead() {
+			return response.get() != null;
 		}
 	}
 
@@ -723,9 +830,7 @@ public class Pool<T, ERR extends Exception> {
 
 	/**
 	 * MultiStackHead supports atomic conditional stack operations on two stacks at once.
-	 * A link's structure must never be modified once a link is put in the stack. It still must
-	 * not be modified after the head is moved forwards. Unlinking is by GC only.
-	 * Existing links may be modified only by changing their contents.
+	 * Links may be truncated of dead objects but the middle structure (next links) must never be altered.
 	 */
 	static final class MultiStackHead<T> {
 		Waiting<T> waiting;

@@ -162,7 +162,7 @@ public class PoolTest {
 		}
 	}
 	
-	@Test
+	@Test(timeout=240000)
 	public void testBrokenSource () {
 		PoolSettings settings= new PoolSettings().setProfile(Profile.GENTLE);
 		settings.giveUpMillis= 100;
@@ -195,7 +195,7 @@ public class PoolTest {
 		assertTrue((t3 - t2) < 100);
 	}
 	
-	@Test
+	@Test(timeout=240000)
 	public void testUnreliableSource() throws InterruptedException, ExecutionException, TimeoutException {
 		final Pool<String, RuntimeException> p = new Pool<>("testUnreliableSource", new UnreliableSource(), new PoolSettings().setProfile(Profile.GENTLE));
 
@@ -229,7 +229,7 @@ public class PoolTest {
 		}
 	}
 	
-	@Test
+	@Test(timeout=240000)
 	public void testAging() throws InterruptedException, ExecutionException, TimeoutException {
 		PoolSettings settings= new PoolSettings().setProfile(Profile.GENTLE);
 		settings.setValidateInterval(400);
@@ -281,7 +281,7 @@ public class PoolTest {
 		}
 	}
 	
-	@Test
+	@Test(timeout=240000)
 	public void testIdle() throws InterruptedException, ExecutionException, TimeoutException {
 		PoolSettings settings= new PoolSettings().setProfile(Profile.GENTLE);
 		settings.setMaxIdleMillis(400);
@@ -293,7 +293,7 @@ public class PoolTest {
 
 		final ExecutorService exec = Executors.newFixedThreadPool(200);
 		try {
-			for (int runs = 0; runs < 10; ++runs) {
+			for (int runs = 0; runs < 4; ++runs) {
 				for (int i = 0; i < results.length; ++i) {
 
 					results[i] = exec.submit(() -> {
@@ -334,11 +334,12 @@ public class PoolTest {
 	}
 	
 
-	@Test
-	public void testTakeGet() throws InterruptedException, ExecutionException, TimeoutException {
+	@Test(timeout=240000)
+	public void testTakeGetFifo() throws InterruptedException, ExecutionException, TimeoutException {
 		final PoolSettings settings= new PoolSettings().setProfile(Profile.GENTLE);
 		settings.setMaxIdleMillis(100);
 		settings.setGiveUpMillis(60000);
+		settings.setFifo(true);
 		final GoodSource src= new GoodSource();
 		final Pool<String, RuntimeException> p = new Pool<>("testTakeGet", src, settings);
 		
@@ -348,7 +349,7 @@ public class PoolTest {
 		final ExecutorService exec = Executors.newFixedThreadPool(500);
 		try {
 
-			for (int runs = 0; runs < 10; ++runs) {
+			for (int runs = 0; runs < 4; ++runs) {
 				for (int i = 0; i < results.length; ++i) {
 					final boolean leakIt = i == 2;
 
@@ -378,6 +379,66 @@ public class PoolTest {
 				System.out.println("GC");
 				Thread.sleep(100);
 			}
+			Thread.sleep(1000);
+			
+			assertEquals(0, p.size());
+			assertEquals(0, p.countAvailable());
+			assertEquals(0, p.countOpening());
+			assertEquals(0, p.countWaiting());
+		} finally {
+			System.out.println("shutdown");
+			p.shutdown();
+			exec.shutdown();
+		}
+	}
+	
+	@Test(timeout=240000)
+	public void testTakeGetNoFifo() throws InterruptedException, ExecutionException, TimeoutException {
+		final PoolSettings settings= new PoolSettings().setProfile(Profile.GENTLE);
+		settings.setMaxIdleMillis(100);
+		settings.setGiveUpMillis(60000);
+		settings.setFifo(false);
+		final GoodSource src= new GoodSource();
+		final Pool<String, RuntimeException> p = new Pool<>("testTakeGet", src, settings);
+		
+		final ConcurrentHashMap<String, Thread> tracker = new ConcurrentHashMap<>();
+		final Future<Object> results[] = new Future[100000];
+
+		final ExecutorService exec = Executors.newFixedThreadPool(500);
+		try {
+
+			for (int runs = 0; runs < 4; ++runs) {
+				for (int i = 0; i < results.length; ++i) {
+					final boolean leakIt = i == 2;
+
+					results[i] = exec.submit(() -> {
+						final Thread t = Thread.currentThread();
+						final String e = p.get();
+						assertNull(tracker.putIfAbsent(e, t));
+						Thread.sleep(5);
+						assertTrue(tracker.remove(e, t));
+
+						if (leakIt) {
+							src.takeBack(e); //The source is checking balance.  Return leaks to it.
+						} else {
+							p.takeBack(e);
+						}
+						return null;
+					});
+				}
+
+				for (final Future<Object> result : results) {
+					result.get(5, TimeUnit.MINUTES);
+				}
+			}
+			
+			for (int i= 0; (p.size() != 0) && (i < 10); ++i) {
+				System.gc();
+				System.out.println("GC");
+				Thread.sleep(100);
+			}
+			Thread.sleep(1000);
+
 			assertEquals(0, p.size());
 			assertEquals(0, p.countAvailable());
 			assertEquals(0, p.countOpening());
