@@ -17,7 +17,7 @@ Done:
 - 500 thread performance tests
 - Leak detection
 - Initial stats
-- Crude testing
+- "Where are they?" dump
 - Maven
 - JDBC Wrapper classes
 - SQL error monitoring for instant ejection
@@ -29,5 +29,3 @@ Done:
 
 TODO:
 - Monitoring tests
-- "Where are they?" dump
-- Simplify and document non-blocking concurrency better
