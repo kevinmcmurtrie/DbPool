@@ -2,8 +2,8 @@
 Database pool that doesn't suck
 
 Goals:
-- No deadlocks
-- Never stalls
+- Fully working with trivial configuration
+- Never stalls or deadlocks
 - DB shielded from app load spikes
 - App shielded from DB connector overloads
 - Graceful sizing adjustments
