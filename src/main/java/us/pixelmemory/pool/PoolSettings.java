@@ -1,13 +1,21 @@
-package us.pixelmemory.dp.pool;
+package us.pixelmemory.pool;
 
 public class PoolSettings {
-	public enum LeaksMode {
-		OFF, ON, AUTO
+	public enum LeakTracing {
+		/**
+		 * Never capture stack traces for leak tracing
+		 */
+		OFF,
+		/**
+		 * Always capture stack traces for leak tracing
+		 */
+		ON,
+		/**
+		 * Capture stack traces for leak tracing after a leak has been detected
+		 */
+		AUTO
 	}
 
-	public enum Profile {
-		TINY, GENTLE, RELIABLE, FAST
-	}
 
 	/**
 	 * How many connections may open concurrently.
@@ -42,7 +50,7 @@ public class PoolSettings {
 	 * How to handle leaks. Leak tracing has a performance cost to generate a stack trace
 	 * when an item is taken from the pool .
 	 */
-	LeaksMode leaksMode= LeaksMode.AUTO;
+	LeakTracing leakTracing= LeakTracing.AUTO;
 	
 	/**
 	 * Use first-in, first-out waiting for connections.
@@ -52,11 +60,10 @@ public class PoolSettings {
 
 	public PoolSettings() {
 		// No-arg for beans
-		setProfile(Profile.GENTLE);
 	}
 
 	public PoolSettings(final int openConcurrent, final int maxOpen, final long maxIdleMillis, final int validateInterval, final long warnLongUseMillis, final int giveUpMillis, final int openBrokenRateMillis, final int giveUpBrokenMillis,
-			final LeaksMode leaksMode, final boolean fifo) {
+			final LeakTracing leakTracing, final boolean fifo) {
 		this.openConcurrent = openConcurrent;
 		this.maxOpen = maxOpen;
 		this.maxIdleMillis = maxIdleMillis;
@@ -65,7 +72,7 @@ public class PoolSettings {
 		this.giveUpMillis = giveUpMillis;
 		this.openBrokenRateMillis = openBrokenRateMillis;
 		this.giveUpBrokenMillis = giveUpBrokenMillis;
-		this.leaksMode = leaksMode;
+		this.leakTracing = leakTracing;
 		this.fifo= fifo;
 	}
 	
@@ -78,60 +85,8 @@ public class PoolSettings {
 		this.giveUpMillis = other.giveUpMillis;
 		this.openBrokenRateMillis = other.openBrokenRateMillis;
 		this.giveUpBrokenMillis = other.giveUpBrokenMillis;
-		this.leaksMode = other.leaksMode;
+		this.leakTracing = other.leakTracing;
 		this.fifo= other.fifo;
-	}
-
-	public PoolSettings setProfile (final Profile profile) {
-		switch (profile) {
-			case TINY:
-				maxOpen = 64;
-				giveUpMillis = 45 * 1000;
-				giveUpBrokenMillis = 1000;
-				maxIdleMillis = 2000;
-				openBrokenRateMillis = 1000;
-				openConcurrent = 2;
-				validateInterval = 30 * 1000;
-				warnLongUseMillis = 15 * 60 * 1000;
-				fifo= true;
-			break;
-			case GENTLE:
-				maxOpen = 200;
-				giveUpMillis = 30 * 1000;
-				giveUpBrokenMillis = 1000;
-				maxIdleMillis = 30 * 1000;
-				openBrokenRateMillis = 500;
-				openConcurrent = 6;
-				validateInterval = 30 * 1000;
-				warnLongUseMillis = 15 * 60 * 1000;
-				fifo= true;
-			break;
-			case RELIABLE:
-				maxOpen = 1000;
-				giveUpMillis = 60 * 1000;
-				giveUpBrokenMillis = 30 * 1000;
-				maxIdleMillis = 60 * 1000;
-				openBrokenRateMillis = 500;
-				openConcurrent = 8;
-				validateInterval = 30 * 1000;
-				warnLongUseMillis = 30 * 60 * 1000;
-				fifo= true;
-			break;
-			case FAST:
-				maxOpen = 1000;
-				giveUpMillis = 5 * 1000;
-				giveUpBrokenMillis = 1 * 1000;
-				maxIdleMillis = 5 * 60 * 1000;
-				openBrokenRateMillis = 250;
-				openConcurrent = 24;
-				validateInterval = 60 * 1000;
-				warnLongUseMillis = 60 * 1000;
-				fifo= false;
-			break;
-			default:
-				throw new IllegalArgumentException("Profile: " + profile);
-		}
-		return this;
 	}
 
 	public int getOpenConcurrent() {
@@ -198,12 +153,12 @@ public class PoolSettings {
 		this.giveUpBrokenMillis = giveUpBrokenMillis;
 	}
 
-	public LeaksMode getLeaksMode() {
-		return leaksMode;
+	public LeakTracing getLeakTracing() {
+		return leakTracing;
 	}
 
-	public void setLeaksMode(LeaksMode leaksMode) {
-		this.leaksMode = leaksMode;
+	public void setLeakTracing(LeakTracing leaksMode) {
+		this.leakTracing = leaksMode;
 	}
 	
 	public void setFifo (final boolean fifo) {

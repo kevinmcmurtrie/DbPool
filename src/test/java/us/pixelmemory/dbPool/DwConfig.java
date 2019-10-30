@@ -1,4 +1,4 @@
-package us.pixelmemory.dp.pool;
+package us.pixelmemory.dbPool;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 

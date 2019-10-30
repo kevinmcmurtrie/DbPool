@@ -1,4 +1,4 @@
-package us.pixelmemory.dp.pool;
+package us.pixelmemory.pool;
 
 import static org.junit.Assert.assertEquals;
 
@@ -7,6 +7,8 @@ import java.util.Collections;
 import java.util.Random;
 
 import org.junit.Test;
+
+import us.pixelmemory.pool.ObjectTracker;
 
 public class ObjectTrackerTest {
 	@Test
@@ -30,7 +32,7 @@ public class ObjectTrackerTest {
 		Collections.sort(values);
 
 		for (final Long l : values) {
-			lt.getTraceRef(l).clearTrace();
+			lt.getTraceRef(l).checkIn();
 		}
 
 		for (final Long l : values) {

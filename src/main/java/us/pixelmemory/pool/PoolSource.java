@@ -1,4 +1,4 @@
-package us.pixelmemory.dp.pool;
+package us.pixelmemory.pool;
 
 public interface PoolSource<T, ERR extends Exception> {
 	T get() throws ERR;

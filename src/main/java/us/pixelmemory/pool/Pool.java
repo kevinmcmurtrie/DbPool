@@ -1,7 +1,8 @@
-package us.pixelmemory.dp.pool;
+package us.pixelmemory.pool;
 
 import java.time.Instant;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
@@ -12,12 +13,11 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
 import java.util.function.Predicate;
-import java.util.stream.Collectors;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import us.pixelmemory.dp.pool.PoolSettings.LeaksMode;
+import us.pixelmemory.pool.PoolSettings.LeakTracing;
 
 /**
  * Simple Object pool with no synchronization locks at all.
@@ -66,7 +66,7 @@ public class Pool<T, ERR extends Exception> {
 	public Pool(final String name, final PoolSource<T, ERR> source, final PoolSettings settings) {
 		this.source = source;
 		this.name = name;
-		showLeaks = settings.leaksMode == LeaksMode.ON;
+		showLeaks = settings.leakTracing == LeakTracing.ON;
 		tracker = new ObjectTracker<>(3 * settings.maxOpen);
 		this.settings = settings;
 		log  = LoggerFactory.getLogger(getClass().getName() + '.' + name);
@@ -89,18 +89,19 @@ public class Pool<T, ERR extends Exception> {
 			}
 			
 			lastLeakTime= System.currentTimeMillis();
-			if (settings.leaksMode == LeaksMode.AUTO) {
+			if (settings.leakTracing == LeakTracing.AUTO) {
 				showLeaks = true;
 			}
 		}
+		traceRef.checkIn();
 
 		if (!running) {
-			sendBack(element);
+			sendBackAsync(element);
 			return;
 		}
 
 		if (useTime > settings.validateInterval) {
-			asyncValidation(element, now);
+			validateAsync(element, now);
 			return;
 		}
 
@@ -114,7 +115,7 @@ public class Pool<T, ERR extends Exception> {
 	}
 
 	public void abandon(final T e) {
-		EXEC.execute(() -> sendBack(e));
+		sendBackAsync(e);
 	}
 
 	public void shutdown() {
@@ -147,9 +148,14 @@ public class Pool<T, ERR extends Exception> {
 	public String getName() {
 		return name;
 	}
+	
+	public List<Taker> whereAreThey () {
+		 return tracker.traceAll ();
+	}
 
 	/**
 	 * Callback after Servicing.request();
+	 * This should not perform blocking I/O.
 	 *
 	 * @return true if Pool is in need of periodic service (not empty / shut down)
 	 */
@@ -322,6 +328,10 @@ public class Pool<T, ERR extends Exception> {
 			}
 		}
 	}
+	
+	private void sendBackAsync(final T e) {
+		EXEC.execute(() -> sendBack(e));
+	}
 
 	private void sendBack(final T e) {
 		try {
@@ -333,7 +343,7 @@ public class Pool<T, ERR extends Exception> {
 		}
 	}
 
-	private void asyncValidation(final T e, final long lastUsed) {
+	private void validateAsync(final T e, final long lastUsed) {
 		EXEC.execute(() -> {
 			final long now = System.currentTimeMillis();
 			if (validate(e)) {
@@ -353,10 +363,35 @@ public class Pool<T, ERR extends Exception> {
 		}
 	}
 
+	private void createAsync() {
+		EXEC.execute(() -> create());
+	}
+
+	private void create() {
+		try {
+			final long now = System.currentTimeMillis();
+			final T e = source.get();
+			tracker.add(e);
+			if (running) {
+				currentFailure = null;
+			}
+			push(e, now, now);
+		} catch (final Exception err) {
+			if (running) {
+				currentFailure = err;
+				log.warn("Failed to create", err);
+			}
+		} finally {
+			pendingOpen.updateAndGet(c -> ((c > 0) ? c - 1 : 0));
+		}
+		SERVICING.request(this); // There may be more waiting but there was a concurrency throttle
+	}
+
 	private long cleanUpForQuit() {
+		//running must already be false
 		TakenElement<T> e;
 		while ((e = tryPop()) != null) {
-			sendBack(e.element);
+			sendBackAsync(e.element);
 		}
 
 		final MultiStackHead<T> original = swapMultiHead(h -> {
@@ -380,7 +415,7 @@ public class Pool<T, ERR extends Exception> {
 		final List<ObjectTracker.TraceRef<T>> leaks = tracker.collectLeaks();
 		
 		if (leaks.isEmpty()) {
-			switch (settings.leaksMode) {
+			switch (settings.leakTracing) {
 				case AUTO:
 					showLeaks= (lastLeakTime + LEAK_TIME) > System.currentTimeMillis();
 					break;
@@ -392,7 +427,7 @@ public class Pool<T, ERR extends Exception> {
 			}
 		} else {
 			lastLeakTime= System.currentTimeMillis();
-			switch (settings.leaksMode) {
+			switch (settings.leakTracing) {
 				case OFF:
 					showLeaks= false;
 					break;
@@ -412,27 +447,6 @@ public class Pool<T, ERR extends Exception> {
 		}
 	}
 
-	private Void create() {
-		try {
-			final long now = System.currentTimeMillis();
-			final T e = source.get();
-			tracker.add(e);
-			if (running) {
-				currentFailure = null;
-			}
-			push(e, now, now);
-		} catch (final Exception err) {
-			if (running) {
-				currentFailure = err;
-				log.warn("Failed to create", err);
-			}
-		} finally {
-			pendingOpen.updateAndGet(c -> ((c > 0) ? c - 1 : 0));
-		}
-		SERVICING.request(this); // There may be more waiting but there was a concurrency throttle
-		return null;
-	}
-	
 	//For service thread
 	private long populate() {
 		final long maxWait = Math.min(settings.maxIdleMillis, settings.validateInterval);
@@ -454,7 +468,7 @@ public class Pool<T, ERR extends Exception> {
 						if (approxTotal < settings.maxOpen) {
 							// Can open more
 							if (pendingOpen.compareAndSet(opening, opening + 1)) {
-								EXEC.submit(this::create);
+								createAsync();
 								if (debug) {
 									log.debug("Opening: Total={}, Opening={}, Waiting={}, Since last open={}", approxTotal, opening+1, countWaiting(), now-lastOpenTime);
 								}
@@ -504,8 +518,6 @@ public class Pool<T, ERR extends Exception> {
 		final long now = System.currentTimeMillis();
 		final long retestTime = now - settings.validateInterval;
 		final long idleTime = now - settings.maxIdleMillis;
-		TakenElement<T> testList = null;
-		TakenElement<T> returnList = null;
 		long nextService= Math.max(settings.maxIdleMillis, settings.validateInterval);
 
 		TakenElement<T> top;
@@ -516,11 +528,9 @@ public class Pool<T, ERR extends Exception> {
 				// Pop a link off the head and use it as a replacement.
 				// It's possible that the head is also in need of work
 				if (top.lastUsed <= idleTime) {
-					top.next = returnList;
-					returnList = top;
+					sendBackAsync (top.element);
 				} else if (top.lastTested <= retestTime) {
-					top.next = testList;
-					testList = top;
+					validateAsync(top.element, top.lastUsed);
 				} else {
 					nextService= Math.min(nextService, Math.min(top.lastUsed - idleTime, top.lastTested - retestTime));
 					break; // Got a good one
@@ -539,17 +549,15 @@ public class Pool<T, ERR extends Exception> {
 				if (r.lastUsed <= idleTime) {
 					final TakenElement<T> old = r.trySwapValue(top.element, top.lastTested);
 					if (old != null) {
+						sendBackAsync (old.element);
 						top = null; // Consumed for swap
-						old.next = returnList;
-						returnList = old;
 						break; // Need a new replacement off the top of the stack
 					}
 				} else if (r.lastTested <= retestTime) {
 					final TakenElement<T> old = r.trySwapValue(top.element, top.lastTested);
 					if (old != null) {
+						validateAsync(old.element, old.lastUsed);
 						top = null; // Consumed for swap
-						old.next = testList;
-						testList = old;
 						break; // Need a new replacement off the top of the stack
 					}
 				} else {
@@ -563,22 +571,7 @@ public class Pool<T, ERR extends Exception> {
 		if (top != null) {
 			push(top.element, top.lastUsed, top.lastTested);
 		}
-		
-		if (log.isDebugEnabled()) {
-			log.debug("Validating {}, Returning {}", count(testList), count(returnList));
-		}
-
-		while (returnList != null) {
-			abandon(returnList.element);
-			returnList = returnList.next;
-		}
-
-		while (testList != null) {
-			// This will validate, refresh the lastTested, and put back on the stack
-			asyncValidation(testList.element, testList.lastUsed);
-			testList = testList.next;
-		}
-				
+			
 		return nextService;
 	}
 
@@ -639,10 +632,24 @@ public class Pool<T, ERR extends Exception> {
 	static class Servicing {
 		private static final Logger log  = LoggerFactory.getLogger(Servicing.class);
 		private static final int maxIntervalMs = 10000;
-		private static final Pool<?, ?> THREAD_QUIT_MARKER = null; // Marker that worker thread for serviceChain has exited
-		private final AtomicReference<ServiceLink> serviceChain = new AtomicReference<>(new ServiceLink(THREAD_QUIT_MARKER));
-		private Thread worker;
-		private final LinkedHashMap<Pool<?, ?>, Long> nextService = new LinkedHashMap<>();
+		
+		/**
+		 *  Marker that worker thread for serviceChain has exited.
+		 *  When serviceChain head is THREAD_QUIT_MARKER, the service thread needs starting.
+		 *  THREAD_QUIT_MARKER.next may temporarily have a value if the servicing thread dies
+		 *  abnormally.  The service thread will fix this.
+		 */
+		private static final ServiceLink THREAD_QUIT_MARKER = new ServiceLink(null);
+		
+		/**
+		 * A Linked List of pools to service.  The servicing thread will the entire list
+		 * for de-duplication and batch processing.
+		 */
+		private final AtomicReference<ServiceLink> serviceChain = new AtomicReference<>(THREAD_QUIT_MARKER);
+		
+		private volatile Thread worker;
+		private final LinkedHashMap<Pool<?, ?>, Long> serviceSchedule = new LinkedHashMap<>();
+		private final LinkedHashSet<Pool<?, ?>> todo = new LinkedHashSet<>();
 
 		static final class ServiceLink {
 			ServiceLink next;
@@ -657,9 +664,6 @@ public class Pool<T, ERR extends Exception> {
 		}
 
 		void request(final Pool<?, ?> p) {
-			if (p == THREAD_QUIT_MARKER) {
-				throw new IllegalArgumentException(String.valueOf(p));
-			}
 			final ServiceLink sl = new ServiceLink(p);
 			final ServiceLink original = serviceChain.getAndUpdate(old -> {
 				sl.next = old;
@@ -667,44 +671,52 @@ public class Pool<T, ERR extends Exception> {
 			});
 
 			// Need to start worker if the top of linked list was the quit marker.
-			if ((original != null) && (original.pool == THREAD_QUIT_MARKER)) {
+			if (original == THREAD_QUIT_MARKER) {
 				worker = new Thread(this::run, "Pool Servicing thread");
 				worker.start();
 			} else {
+				//This value may be stale (another thread creating worker) but that worker won't be parked.
 				LockSupport.unpark(worker);
 			}
 		}
 
 		private void run() {
-			final ServiceLink dead = new ServiceLink(THREAD_QUIT_MARKER);
 			boolean gracefulQuit = false;
 			try {
 				do {
 					do {
-						final long now = System.currentTimeMillis();
+						//Gather all requests as a batch
 						ServiceLink sl = serviceChain.getAndSet(null);
 						if (sl != null) {
-							final Long nowLong = Long.valueOf(now);
 							do {
-								if (sl.pool != THREAD_QUIT_MARKER) {
-									nextService.put(sl.pool, nowLong);
+								if (sl != THREAD_QUIT_MARKER) {
+									//Skip but keep going.  There's more if the previous worker had died.
+									todo.add(sl.pool);
 								}
 							} while ((sl = sl.next) != null);
 						}
 
-						final List<Pool<?, ?>> todo = nextService.entrySet().stream().filter(e -> e.getValue().longValue() <= now).map(Map.Entry::getKey).collect(Collectors.toList());
+						final long now = System.currentTimeMillis();
+						for (final Map.Entry<Pool<?, ?>, Long> e : serviceSchedule.entrySet()) {
+							if (e.getValue().longValue() <= now) {
+								todo.add(e.getKey());
+							}
+						}
+						
 						long sleep = maxIntervalMs;
+						
 						for (final Pool<?, ?> p : todo) {
 							final long wait = p.service();
 							if (wait >= 0) {
 								if (sleep > wait) {
 									sleep = wait;
 								}
-								nextService.put(p, Long.valueOf(now + wait));
+								serviceSchedule.put(p, Long.valueOf(now + wait));
 							} else {
-								nextService.remove(p);
+								serviceSchedule.remove(p);
 							}
 						}
+						todo.clear();
 
 						if (sleep > 0) {
 							LockSupport.parkNanos(sleep);
@@ -713,16 +725,18 @@ public class Pool<T, ERR extends Exception> {
 								return;
 							}
 						}
-					} while (!nextService.isEmpty());
-				} while (!serviceChain.compareAndSet(null, dead));
+					} while (!serviceSchedule.isEmpty());
+					
+					//Nothing to service.  Try exiting.
+				} while (!serviceChain.compareAndSet(null, THREAD_QUIT_MARKER));
+				THREAD_QUIT_MARKER.next= null;
 				gracefulQuit = true;
 			} finally {
 				if (!gracefulQuit) {
 					// This can leave some requests hanging but it fixes the next service request
-					final ServiceLink dead2 = new ServiceLink(THREAD_QUIT_MARKER);
 					serviceChain.getAndUpdate(old -> {
-						dead2.next = old;
-						return dead2;
+						THREAD_QUIT_MARKER.next = old;
+						return THREAD_QUIT_MARKER;
 					});
 				}
 			}

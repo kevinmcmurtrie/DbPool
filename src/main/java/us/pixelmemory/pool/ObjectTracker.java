@@ -1,9 +1,12 @@
-package us.pixelmemory.dp.pool;
+package us.pixelmemory.pool;
 
+import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.lang.ref.ReferenceQueue;
 import java.lang.ref.WeakReference;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Date;
 import java.util.List;
 import java.util.TreeMap;
 import java.util.concurrent.atomic.AtomicReferenceArray;
@@ -110,7 +113,32 @@ class ObjectTracker<T> {
 		}
 		return Collections.emptyList();
 	}
+	
+	/**
+	 * @return Safe snapshot of everything that is checked out
+	 */
+	public List<Taker> traceAll () {
+		final List<Taker> takers= new ArrayList<>();
+		for (int i= 0; i < references.length(); ++i) {
+			final TraceRef<T>[] traces = references.get(i);
+			if (traces != null) {
+				for (TraceRef<T> tr : traces) {
+					Taker taker= new TakerImpl(tr);
+					//Filter out checked-in
+					if (taker.getThread() != null) {
+						takers.add(taker);
+					}
+				}
+			}
+		}
+		
+		return takers;
+	}
 
+	/**
+	 * Manual Testing
+	 * @return Chain Length : Count
+	 */
 	public TreeMap<Integer, Integer> buildCollisionHistogram() {
 		final TreeMap<Integer, Integer> map = new TreeMap<>();
 		for (int i = 0; i < references.length(); ++i) {
@@ -177,15 +205,63 @@ class ObjectTracker<T> {
 	}
 
 	@SuppressWarnings("serial")
-	private static class Trace extends RuntimeException {
+	public static class Trace extends RuntimeException {
 		public Trace() {
 			super("Leak trace");
+		}
+		
+		@Override
+		public String toString() {
+			//No classpath
+	        return getMessage();
+	    }
+	}
+	
+	private static class TakerImpl implements Taker {
+		private final Trace trace;
+		private final Thread thread;
+		private final long time;
+
+		TakerImpl(TraceRef<?> traceRef) {
+			trace = traceRef.getTrace();
+			time = traceRef.getTime();
+			thread = traceRef.getThread();
+		}
+
+		@Override
+		public long getTime() {
+			return time;
+		}
+
+		@Override
+		public Thread getThread() {
+			return thread;
+		}
+
+		@Override
+		public Trace getTrace() {
+			return trace;
+		}
+
+		@Override
+		public String toString() {
+			StringWriter buf = new StringWriter();
+			try (PrintWriter out = new PrintWriter(buf)) {
+				out.append(thread.toString()).append(':').append(String.valueOf(thread.getId())).append(" on ").append(new Date(time).toString());
+
+				if (trace != null) {
+					out.println();
+					trace.printStackTrace(out);
+				}
+			}
+			return buf.toString();
 		}
 	}
 
 	public static class TraceRef<T> extends WeakReference<T> {
 		final int hash;
-		private Throwable trace;
+		private Trace trace;
+		private Thread thread;
 		private long time;
 
 		TraceRef(final int hash, final T referent, final ReferenceQueue<? super T> q) {
@@ -194,19 +270,25 @@ class ObjectTracker<T> {
 		}
 
 		public void checkOut(final boolean traceOn) {
-			trace = traceOn ? new Trace().fillInStackTrace() : null;
+			trace = traceOn ? (Trace)(new Trace().fillInStackTrace()) : null;
 			time = System.currentTimeMillis();
+			this.thread = Thread.currentThread();
 		}
 
 		public long getTime() {
 			return time;
 		}
+		
+		public Thread getThread() {
+			return thread;
+		}
 
-		public Throwable getTrace() {
+		public Trace getTrace() {
 			return trace;
 		}
 
-		public void clearTrace() {
+		public void checkIn() {
+			thread= null;
 			trace = null;
 		}
 	}

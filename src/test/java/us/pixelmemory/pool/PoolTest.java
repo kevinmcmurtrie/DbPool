@@ -1,4 +1,4 @@
-package us.pixelmemory.dp.pool;
+package us.pixelmemory.pool;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
@@ -7,6 +7,7 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 import java.util.Collections;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -15,10 +16,16 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.stream.Collectors;
 
 import org.junit.Test;
 
-import us.pixelmemory.dp.pool.PoolSettings.Profile;
+import us.pixelmemory.dbPool.DbPoolSettings;
+import us.pixelmemory.dbPool.DbPoolProfile;
+import us.pixelmemory.pool.Pool;
+import us.pixelmemory.pool.PoolSource;
+import us.pixelmemory.pool.Taker;
+import us.pixelmemory.pool.PoolSettings.LeakTracing;
 
 public class PoolTest {
 
@@ -164,9 +171,9 @@ public class PoolTest {
 	
 	@Test(timeout=240000)
 	public void testBrokenSource () {
-		PoolSettings settings= new PoolSettings().setProfile(Profile.GENTLE);
-		settings.giveUpMillis= 100;
-		settings.giveUpBrokenMillis= 1;
+		DbPoolSettings settings= new DbPoolSettings().setProfile(DbPoolProfile.GENTLE);
+		settings.setGiveUpMillis (100);
+		settings.setGiveUpBrokenMillis (1);
 		
 		final Pool<String, RuntimeException> p = new Pool<>("testTakeGet", new ErrorSource(), settings);
 		
@@ -197,7 +204,7 @@ public class PoolTest {
 	
 	@Test(timeout=240000)
 	public void testUnreliableSource() throws InterruptedException, ExecutionException, TimeoutException {
-		final Pool<String, RuntimeException> p = new Pool<>("testUnreliableSource", new UnreliableSource(), new PoolSettings().setProfile(Profile.GENTLE));
+		final Pool<String, RuntimeException> p = new Pool<>("testUnreliableSource", new UnreliableSource(), new DbPoolSettings().setProfile(DbPoolProfile.GENTLE));
 
 		final ConcurrentHashMap<String, Thread> tracker = new ConcurrentHashMap<>();
 		final Future<Object> results[] = new Future[6000];
@@ -231,7 +238,7 @@ public class PoolTest {
 	
 	@Test(timeout=240000)
 	public void testAging() throws InterruptedException, ExecutionException, TimeoutException {
-		PoolSettings settings= new PoolSettings().setProfile(Profile.GENTLE);
+		DbPoolSettings settings= new DbPoolSettings().setProfile(DbPoolProfile.GENTLE);
 		settings.setValidateInterval(400);
 		
 		final Pool<String, RuntimeException> p = new Pool<>("testAging", new NoReuseSource(), settings);
@@ -283,7 +290,7 @@ public class PoolTest {
 	
 	@Test(timeout=240000)
 	public void testIdle() throws InterruptedException, ExecutionException, TimeoutException {
-		PoolSettings settings= new PoolSettings().setProfile(Profile.GENTLE);
+		DbPoolSettings settings= new DbPoolSettings().setProfile(DbPoolProfile.GENTLE);
 		settings.setMaxIdleMillis(400);
 		
 		final Pool<String, RuntimeException> p = new Pool<>("testIdle", new GoodSource(), settings);
@@ -336,7 +343,7 @@ public class PoolTest {
 
 	@Test(timeout=240000)
 	public void testTakeGetFifo() throws InterruptedException, ExecutionException, TimeoutException {
-		final PoolSettings settings= new PoolSettings().setProfile(Profile.GENTLE);
+		final DbPoolSettings settings= new DbPoolSettings().setProfile(DbPoolProfile.GENTLE);
 		settings.setMaxIdleMillis(100);
 		settings.setGiveUpMillis(60000);
 		settings.setFifo(true);
@@ -394,7 +401,7 @@ public class PoolTest {
 	
 	@Test(timeout=240000)
 	public void testTakeGetNoFifo() throws InterruptedException, ExecutionException, TimeoutException {
-		final PoolSettings settings= new PoolSettings().setProfile(Profile.GENTLE);
+		final DbPoolSettings settings= new DbPoolSettings().setProfile(DbPoolProfile.GENTLE);
 		settings.setMaxIdleMillis(100);
 		settings.setGiveUpMillis(60000);
 		settings.setFifo(false);
@@ -445,6 +452,46 @@ public class PoolTest {
 			assertEquals(0, p.countWaiting());
 		} finally {
 			System.out.println("shutdown");
+			p.shutdown();
+			exec.shutdown();
+		}
+	}
+	
+	@Test(timeout=240000)
+	public void testWhereAreThey() throws InterruptedException, ExecutionException, TimeoutException {
+		DbPoolSettings settings = new DbPoolSettings().setProfile(DbPoolProfile.GENTLE);
+		settings.setLeakTracing(LeakTracing.ON);
+		settings.setMaxIdleMillis(400);
+
+		final Pool<String, RuntimeException> p = new Pool<>("testIdle", new GoodSource(), settings);
+
+		final Future<String> results[] = new Future[4];
+
+		final ExecutorService exec = Executors.newFixedThreadPool(4);
+		try {
+			for (int i = 0; i < results.length; ++i) {
+
+				results[i] = exec.submit(() -> {
+					return p.get();
+				});
+			}
+			
+			for (int i = 0; i < results.length; ++i) {
+				results[i].get();
+			}
+			
+			List<Taker> filledList= p.whereAreThey();
+			assertEquals(4, filledList.size());
+			System.out.println(filledList.stream().map(Object::toString).collect(Collectors.joining("\n")));
+			
+			for (int i = 0; i < results.length; ++i) {
+				p.takeBack(results[i].get());
+			}
+			
+			List<Taker> emptyList= p.whereAreThey();
+			assertEquals(0, emptyList.size());
+
+		} finally {
 			p.shutdown();
 			exec.shutdown();
 		}
