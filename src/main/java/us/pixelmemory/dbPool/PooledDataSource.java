@@ -1,4 +1,4 @@
-package us.pixelmemory.dp.pool;
+package us.pixelmemory.dbPool;
 
 import java.io.PrintWriter;
 import java.sql.Connection;
@@ -10,7 +10,9 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import us.pixelmemory.dp.pool.ConnectionWrapper.Restoration;
+import us.pixelmemory.dbPool.ConnectionWrapper.Restoration;
+import us.pixelmemory.pool.Pool;
+import us.pixelmemory.pool.PoolSettings;
 
 import javax.sql.DataSource;
 
@@ -45,13 +47,13 @@ public class PooledDataSource implements DataSource {
 
 	@Override
 	public void setLoginTimeout(int seconds) throws SQLException {
-		poolSettings.giveUpMillis= 1000 * seconds;
-		poolSettings.giveUpBrokenMillis = 1 + poolSettings.giveUpMillis / 4;
+		poolSettings.setGiveUpMillis(1 + 1000 * seconds);
+		poolSettings.setGiveUpBrokenMillis(1 + 250 * seconds);
 	}
 
 	@Override
 	public int getLoginTimeout() throws SQLException {
-		return poolSettings.giveUpMillis / 1000;
+		return poolSettings.getGiveUpMillis() / 1000;
 	}
 
 	@Override

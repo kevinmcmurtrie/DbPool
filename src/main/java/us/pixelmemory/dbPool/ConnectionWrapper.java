@@ -1,4 +1,4 @@
-package us.pixelmemory.dp.pool;
+package us.pixelmemory.dbPool;
 
 import java.sql.Array;
 import java.sql.Blob;
@@ -19,6 +19,8 @@ import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeoutException;
+
+import us.pixelmemory.pool.Pool;
 
 /**
  * Kevin McMurtrie

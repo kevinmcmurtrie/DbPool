@@ -1,4 +1,4 @@
-package us.pixelmemory.dp.pool;
+package us.pixelmemory.dbPool;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;

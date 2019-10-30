@@ -1,4 +1,4 @@
-package us.pixelmemory.dp.pool;
+package us.pixelmemory.dbPool;
 
 import static com.codahale.metrics.MetricRegistry.name;
 
@@ -12,17 +12,20 @@ import com.codahale.metrics.Gauge;
 import com.codahale.metrics.MetricRegistry;
 
 import io.dropwizard.db.ManagedDataSource;
+import us.pixelmemory.dbPool.ConnectionWrapper;
+import us.pixelmemory.dbPool.JDBCConnectionSettings;
+import us.pixelmemory.dbPool.PooledDataSource;
 
 public class DwManagedDataSource implements ManagedDataSource {
-	private final PoolSettings poolSettings;
+	private final DbPoolSettings poolSettings;
 	private final JDBCConnectionSettings jdbcSettings;
 	private final PooledDataSource src;
 	private final MetricRegistry metricRegistry;
 	private boolean registered= false;
 	
-	public DwManagedDataSource(MetricRegistry metricRegistry, String name, PoolSettings poolSettings, JDBCConnectionSettings jdbcSettings) {
+	public DwManagedDataSource(MetricRegistry metricRegistry, String name, DbPoolSettings poolSettings, JDBCConnectionSettings jdbcSettings) {
 		this.metricRegistry = metricRegistry;
-		this.poolSettings = new PoolSettings(poolSettings);
+		this.poolSettings = new DbPoolSettings(poolSettings);
 		this.jdbcSettings= new JDBCConnectionSettings(jdbcSettings);
 		src= new PooledDataSource(name, this.poolSettings, this.jdbcSettings, ConnectionWrapper.BASIC_RESTORATION);
 	}

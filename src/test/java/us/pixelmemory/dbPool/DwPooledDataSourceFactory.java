@@ -1,4 +1,4 @@
-package us.pixelmemory.dp.pool;
+package us.pixelmemory.dbPool;
 
 import java.util.Map;
 import java.util.Optional;
@@ -10,8 +10,8 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import io.dropwizard.db.ManagedDataSource;
 import io.dropwizard.db.PooledDataSourceFactory;
 import io.dropwizard.util.Duration;
-import us.pixelmemory.dp.pool.PoolSettings.LeaksMode;
-import us.pixelmemory.dp.pool.PoolSettings.Profile;
+import us.pixelmemory.dbPool.JDBCConnectionSettings;
+import us.pixelmemory.pool.PoolSettings.LeakTracing;
 
 /**
  * The original DataSourceFactory makes assumptions about a pool design so it has a LOT
@@ -21,13 +21,13 @@ import us.pixelmemory.dp.pool.PoolSettings.Profile;
  * @author Kevin McMurtrie
  */
 public class DwPooledDataSourceFactory implements PooledDataSourceFactory {
-	private final PoolSettings poolSettings = new PoolSettings();
+	private final DbPoolSettings poolSettings = new DbPoolSettings();
 	private final JDBCConnectionSettings jdbcSettings = new JDBCConnectionSettings();
 	private boolean autoCommentsEnabled = true;
 	private String dbiHealthCheckQuery= "SELECT 1";
 
 	@JsonProperty
-	public PoolSettings setProfile(Profile profile) {
+	public DbPoolSettings setProfile(DbPoolProfile profile) {
 		return poolSettings.setProfile(profile);
 	}
 
@@ -122,16 +122,16 @@ public class DwPooledDataSourceFactory implements PooledDataSourceFactory {
      * How to handle leaked connections.
      */
     @JsonProperty
-	public LeaksMode getLeaksMode() {
-		return poolSettings.getLeaksMode();
+	public LeakTracing getLeaksMode() {
+		return poolSettings.getLeakTracing();
 	}
 
     /**
      * How to handle leaked connections.
      */
     @JsonProperty
-	public void setLeaksMode(LeaksMode leaksMode) {
-		poolSettings.setLeaksMode(leaksMode);
+	public void setLeaksMode(LeakTracing leaksMode) {
+		poolSettings.setLeakTracing(leaksMode);
 	}
 
     @JsonProperty

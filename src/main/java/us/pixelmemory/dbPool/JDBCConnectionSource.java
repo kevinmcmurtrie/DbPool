@@ -1,4 +1,4 @@
-package us.pixelmemory.dp.pool;
+package us.pixelmemory.dbPool;
 
 import java.lang.ref.WeakReference;
 import java.sql.Connection;
@@ -11,6 +11,8 @@ import java.util.Enumeration;
 import java.util.Iterator;
 import java.util.Properties;
 import java.util.concurrent.ConcurrentHashMap;
+
+import us.pixelmemory.pool.PoolSource;
 
 public class JDBCConnectionSource implements PoolSource<Connection, SQLException> {
 	private static final ConcurrentHashMap<String, CacheElement<Driver>> driverByName = new ConcurrentHashMap<>();
