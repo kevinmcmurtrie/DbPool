@@ -1,4 +1,8 @@
 # DbPool
+
+Not under active development.  Message me if you'd like the code modernized.
+------------
+
 Database pool that doesn't suck
 
 Goals:
